@@ -29,7 +29,27 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	gw := buildGateway(logger)
-	st := store.NewMemory() // swap for a Cloud SQL-backed store in production
+
+	// Storage: Cloud SQL (Postgres) when DATABASE_URL is set, else in-memory.
+	var st store.Store
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		pg, err := store.NewPostgres(context.Background(), dsn)
+		if err != nil {
+			logger.Error("cloud sql connect failed", "err", err)
+			os.Exit(1)
+		}
+		if err := pg.Migrate(context.Background()); err != nil {
+			logger.Error("cloud sql migrate failed", "err", err)
+			os.Exit(1)
+		}
+		defer pg.Close()
+		st = pg
+		logger.Info("using cloud sql (postgres) store")
+	} else {
+		st = store.NewMemory()
+		logger.Warn("DATABASE_URL unset; using in-memory store")
+	}
+
 	notifier := email.LogNotifier{Logger: logger}
 
 	// Seed a default tenant that charges on the platform (your) Stripe account
