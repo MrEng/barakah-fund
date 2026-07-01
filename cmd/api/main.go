@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/barakahfund/payments/internal/app"
+	"github.com/barakahfund/payments/internal/domain"
 	"github.com/barakahfund/payments/internal/email"
 	"github.com/barakahfund/payments/internal/httpapi"
 	"github.com/barakahfund/payments/internal/payment"
@@ -30,15 +31,29 @@ func main() {
 	st := store.NewMemory() // swap for a Cloud SQL-backed store in production
 	notifier := email.LogNotifier{Logger: logger}
 
+	// Seed a default tenant that charges on the platform (your) Stripe account
+	// directly: an empty StripeAccountID means no Stripe-Account header, i.e. no
+	// Connect. This lets you use your own test account without configuring a
+	// tenant — API calls that omit tenant_id fall back to this one.
+	defaultTenantID := envStr("DEFAULT_TENANT_ID", "default")
+	_ = st.SaveTenant(context.Background(), domain.Tenant{
+		ID: defaultTenantID, Name: "Platform (direct)", StripeAccountID: "", ChargesEnabled: true,
+	})
+	logger.Info("seeded default tenant", "tenant_id", defaultTenantID, "mode", "platform-direct")
+
 	svc := app.New(gw, st, notifier, app.Options{ApplicationFeeBps: envInt("APPLICATION_FEE_BPS", 0)})
-	router := webhook.New(st, notifier, time.Now)
+	router := webhook.New(st, notifier, time.Now,
+		webhook.WithForwarder(webhook.NewHTTPForwarder()),
+		webhook.WithDefaultWebhookURL(os.Getenv("DEFAULT_WEBHOOK_URL")),
+	)
 	engine := recon.New(gw, st, time.Now)
 
 	srv := httpapi.NewServer(httpapi.Deps{
 		Service: svc, Router: router, Engine: engine, Gateway: gw, Store: st,
-		WebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
-		Currency:      envStr("REPORTING_CURRENCY", "USD"),
-		Logger:        logger,
+		WebhookSecret:   os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		Currency:        envStr("REPORTING_CURRENCY", "USD"),
+		DefaultTenantID: defaultTenantID,
+		Logger:          logger,
 	})
 
 	addr := ":" + envStr("PORT", "8080") // Cloud Run provides $PORT

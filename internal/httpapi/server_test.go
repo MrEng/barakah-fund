@@ -78,6 +78,32 @@ func TestStartDonationEndpoint(t *testing.T) {
 	}
 }
 
+func TestCreatePaymentLinkEndpoint(t *testing.T) {
+	srv, _, d := newServer(t)
+	for _, tc := range []struct {
+		name      string
+		recurring bool
+		wantMode  string
+	}{
+		{"one-time", false, "payment"},
+		{"subscription", true, "subscription"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"tenant_id":"t1","customer_id":%q,"product_name":"Zakat","amount":5000,"currency":"USD","recurring":%v}`, d.ID, tc.recurring)
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/payment-links", bytes.NewBufferString(body)))
+			if rr.Code != http.StatusCreated {
+				t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+			}
+			var resp struct{ URL, Mode string }
+			json.Unmarshal(rr.Body.Bytes(), &resp)
+			if resp.URL == "" || resp.Mode != tc.wantMode {
+				t.Fatalf("resp = %+v, want mode %s", resp, tc.wantMode)
+			}
+		})
+	}
+}
+
 func TestWebhookEndpoint(t *testing.T) {
 	srv, st, d := newServer(t)
 	// Create a donation to get a real intent id.

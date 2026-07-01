@@ -14,19 +14,36 @@ import (
 	"github.com/barakahfund/payments/internal/store"
 )
 
-// Router applies events to the store and sends failure emails.
+// Router applies events to the store, sends failure emails, and forwards a
+// notification to the caller's webhook URL (per-request, else the default).
 type Router struct {
-	store    store.Store
-	notifier email.Notifier
-	now      func() time.Time
+	store             store.Store
+	notifier          email.Notifier
+	now               func() time.Time
+	forwarder         Forwarder
+	defaultWebhookURL string
 }
 
-// New builds a Router.
-func New(st store.Store, n email.Notifier, now func() time.Time) *Router {
+// Option configures a Router.
+type Option func(*Router)
+
+// WithForwarder sets the outbound webhook forwarder.
+func WithForwarder(f Forwarder) Option { return func(r *Router) { r.forwarder = f } }
+
+// WithDefaultWebhookURL sets the fallback URL used when a request did not
+// specify its own webhook_url.
+func WithDefaultWebhookURL(u string) Option { return func(r *Router) { r.defaultWebhookURL = u } }
+
+// New builds a Router. Forwarding is disabled unless WithForwarder is given.
+func New(st store.Store, n email.Notifier, now func() time.Time, opts ...Option) *Router {
 	if now == nil {
 		now = time.Now
 	}
-	return &Router{store: st, notifier: n, now: now}
+	r := &Router{store: st, notifier: n, now: now}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
 }
 
 // Handle applies one event. Unknown or duplicate events are no-ops.
@@ -40,17 +57,49 @@ func (r *Router) Handle(ctx context.Context, e payment.Event) error {
 	}
 	switch e.Type {
 	case payment.EventPaymentSucceeded:
-		_, err := r.applyPaymentStatus(ctx, e, domain.PaymentSucceeded)
-		return err
+		p, err := r.applyPaymentStatus(ctx, e, domain.PaymentSucceeded)
+		if err != nil {
+			return err
+		}
+		return r.forward(ctx, e, p)
 	case payment.EventPaymentFailed:
 		p, err := r.applyPaymentStatus(ctx, e, domain.PaymentFailed)
 		if err != nil {
 			return err
 		}
-		return r.emailFailure(ctx, p)
+		if err := r.emailFailure(ctx, p); err != nil {
+			return err
+		}
+		return r.forward(ctx, e, p)
 	default:
 		return nil
 	}
+}
+
+// forward delivers a notification to the caller's webhook URL. The URL is taken
+// from the request-supplied webhook_url metadata, falling back to the default.
+func (r *Router) forward(ctx context.Context, e payment.Event, p domain.Payment) error {
+	if r.forwarder == nil {
+		return nil
+	}
+	url := ""
+	if e.PaymentIntent != nil {
+		url = e.PaymentIntent.Metadata["webhook_url"]
+	}
+	if url == "" {
+		url = r.defaultWebhookURL
+	}
+	if url == "" {
+		return nil // nothing to forward to
+	}
+	return r.forwarder.Notify(ctx, url, Notification{
+		Event:           string(e.Type),
+		PaymentIntentID: p.StripePaymentIntentID,
+		TenantID:        p.TenantID,
+		Status:          string(p.Status),
+		Amount:          p.Amount.Amount,
+		Currency:        p.Amount.Currency,
+	})
 }
 
 func (r *Router) applyPaymentStatus(ctx context.Context, e payment.Event, status domain.PaymentStatus) (domain.Payment, error) {

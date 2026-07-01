@@ -196,6 +196,20 @@ func TestCreateDonationLinkSingleAndRecurring(t *testing.T) {
 	if lp.Metadata["tenant_id"] != f.tenant.ID || lp.Metadata["product_id"] != "prod_zakat" {
 		t.Fatalf("link metadata = %+v", lp.Metadata)
 	}
+
+	// caller-supplied custom parameters ride through alongside reserved keys
+	custom, err := f.svc.CreateDonationLink(ctx, LinkInput{
+		TenantID: f.tenant.ID, ProductName: "Ramadan", Amount: money.New(1000, "USD"),
+		Metadata: map[string]string{"campaign": "ramadan-2026", "dedication": "in memory of X"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = custom
+	cm := f.gw.LastLinkParams().Metadata
+	if cm["campaign"] != "ramadan-2026" || cm["dedication"] != "in memory of X" || cm["tenant_id"] != f.tenant.ID {
+		t.Fatalf("custom metadata not propagated: %+v", cm)
+	}
 	if lp.PrefilledEmail != f.donor.Email || lp.ClientReferenceID != f.donor.ID {
 		t.Fatalf("donor prefill not propagated: %+v", lp)
 	}
@@ -205,6 +219,35 @@ func TestCreateDonationLinkSingleAndRecurring(t *testing.T) {
 	}
 	if recur.Mode != "subscription" {
 		t.Fatalf("recurring link mode = %s", recur.Mode)
+	}
+}
+
+func TestOneTimeLinkAmountBehaviour(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+
+	// one-time WITH an amount → fixed price (not pay-what-you-want)
+	if _, err := f.svc.CreateDonationLink(ctx, LinkInput{TenantID: f.tenant.ID, ProductName: "Fixed", Amount: money.New(500, "USD")}); err != nil {
+		t.Fatal(err)
+	}
+	if p := f.gw.LastPriceParams(); p.CustomAmount || p.Amount.Amount != 500 {
+		t.Fatalf("expected fixed 500 price, got %+v", p)
+	}
+
+	// one-time WITHOUT an amount → pay-what-you-want
+	if _, err := f.svc.CreateDonationLink(ctx, LinkInput{TenantID: f.tenant.ID, ProductName: "PWYW", Amount: money.New(0, "USD")}); err != nil {
+		t.Fatal(err)
+	}
+	if p := f.gw.LastPriceParams(); !p.CustomAmount {
+		t.Fatalf("expected pay-what-you-want when no amount, got %+v", p)
+	}
+
+	// one-time WITH amount + editable → custom price with the amount as preset
+	if _, err := f.svc.CreateDonationLink(ctx, LinkInput{TenantID: f.tenant.ID, ProductName: "Editable", Amount: money.New(700, "USD"), AmountEditable: true}); err != nil {
+		t.Fatal(err)
+	}
+	if p := f.gw.LastPriceParams(); !p.CustomAmount || p.Amount.Amount != 700 {
+		t.Fatalf("expected editable preset 700, got %+v", p)
 	}
 }
 

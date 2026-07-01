@@ -329,6 +329,10 @@ func (c *Client) CreatePrice(ctx context.Context, account string, p payment.Crea
 	form.Set("currency", strings.ToLower(p.Amount.Currency))
 	if p.CustomAmount {
 		form.Set("custom_unit_amount[enabled]", "true")
+		if p.Amount.Amount > 0 {
+			// pre-fill the editable amount box with the provided amount
+			form.Set("custom_unit_amount[preset]", strconv.FormatInt(p.Amount.Amount, 10))
+		}
 	} else {
 		form.Set("unit_amount", strconv.FormatInt(p.Amount.Amount, 10))
 	}

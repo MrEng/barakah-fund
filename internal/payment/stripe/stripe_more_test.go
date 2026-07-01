@@ -102,13 +102,16 @@ func TestProductAndPrices(t *testing.T) {
 	if err != nil || prod.ID != "prod_1" {
 		t.Fatalf("product = %+v err %v", prod, err)
 	}
-	// custom amount (pay-what-you-want) one-time price
-	_, err = c.CreatePrice(ctx, "acct_1", payment.CreatePriceParams{ProductID: "prod_1", Amount: money.New(0, "USD"), CustomAmount: true})
+	// custom amount (pay-what-you-want) one-time price with an editable preset
+	_, err = c.CreatePrice(ctx, "acct_1", payment.CreatePriceParams{ProductID: "prod_1", Amount: money.New(700, "USD"), CustomAmount: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if rec.get("custom_unit_amount[enabled]") != "true" {
 		t.Fatalf("expected custom_unit_amount enabled, form=%v", rec.form)
+	}
+	if rec.get("custom_unit_amount[preset]") != "700" {
+		t.Fatalf("expected editable preset 700, form=%v", rec.form)
 	}
 	// fixed recurring price
 	_, err = c.CreatePrice(ctx, "acct_1", payment.CreatePriceParams{ProductID: "prod_1", Amount: money.New(1500, "USD"), Interval: "month"})

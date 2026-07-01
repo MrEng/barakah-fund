@@ -117,6 +117,7 @@ type StartDonationInput struct {
 	Amount          money.Money
 	PaymentMethodID string // set to confirm a saved card server-side
 	IdempotencyKey  string
+	WebhookURL      string // optional; caller's notification URL (else the default)
 }
 
 // StartDonation creates a PaymentIntent and returns the client secret for the
@@ -138,6 +139,10 @@ func (s *Service) StartDonation(ctx context.Context, in StartDonationInput) (pay
 			return s.gw.GetPaymentIntent(ctx, t.StripeAccountID, piID)
 		}
 	}
+	meta := map[string]string{"tenant_id": in.TenantID, "product_id": in.ProductID}
+	if in.WebhookURL != "" {
+		meta["webhook_url"] = in.WebhookURL
+	}
 	pi, err := s.gw.CreatePaymentIntent(ctx, t.StripeAccountID, payment.CreatePaymentIntentParams{
 		Amount:          in.Amount,
 		CustomerID:      d.StripeCustomerID,
@@ -145,7 +150,7 @@ func (s *Service) StartDonation(ctx context.Context, in StartDonationInput) (pay
 		ApplicationFee:  s.fee(in.Amount),
 		ReceiptEmail:    d.Email,
 		Confirm:         in.PaymentMethodID != "",
-		Metadata:        map[string]string{"tenant_id": in.TenantID, "product_id": in.ProductID},
+		Metadata:        meta,
 	})
 	if err != nil {
 		return payment.PaymentIntent{}, fmt.Errorf("create payment intent: %w", err)
@@ -174,6 +179,7 @@ type RecurringInput struct {
 	ProductID       string
 	Amount          money.Money
 	PaymentMethodID string
+	WebhookURL      string // optional; caller's notification URL (else the default)
 }
 
 // CreateRecurringDonation mints a fixed monthly price at the donor's chosen
@@ -200,8 +206,13 @@ func (s *Service) CreateRecurringDonation(ctx context.Context, in RecurringInput
 	if err != nil {
 		return payment.Subscription{}, fmt.Errorf("create price: %w", err)
 	}
+	submeta := map[string]string{"tenant_id": in.TenantID, "product_id": in.ProductID}
+	if in.WebhookURL != "" {
+		submeta["webhook_url"] = in.WebhookURL
+	}
 	sub, err := s.gw.CreateSubscription(ctx, t.StripeAccountID, payment.CreateSubscriptionParams{
 		CustomerID: d.StripeCustomerID, PriceID: price.ID, PaymentMethodID: in.PaymentMethodID,
+		Metadata: submeta,
 	})
 	if err != nil {
 		return payment.Subscription{}, fmt.Errorf("create subscription: %w", err)
@@ -253,7 +264,13 @@ type LinkInput struct {
 	CampaignID  string      // optional, stamped into metadata
 	Amount      money.Money // preset/min for custom; fixed for recurring
 	Recurring   bool
-	DonorID     string // optional; when set, the link pre-fills the donor's email
+	DonorID     string            // optional; when set, the link pre-fills the donor's email
+	WebhookURL  string            // optional; caller's notification URL (else the default)
+	Metadata    map[string]string // optional custom parameters; ride through to the charge and webhooks
+
+	// AmountEditable (one-time only): when true, Amount is a pre-filled default
+	// the donor can change on the hosted page; when false, Amount is locked.
+	AmountEditable bool
 }
 
 // CreateDonationLink builds a Stripe-hosted payment link. Single-payment links
@@ -273,23 +290,39 @@ func (s *Service) CreateDonationLink(ctx context.Context, in LinkInput) (payment
 	}
 	priceParams := payment.CreatePriceParams{ProductID: prod.ID, Amount: in.Amount}
 	mode := "payment"
-	if in.Recurring {
-		priceParams.Interval = "month" // fixed recurring amount
+	switch {
+	case in.Recurring:
+		priceParams.Interval = "month" // fixed monthly amount
 		mode = "subscription"
-	} else {
-		priceParams.CustomAmount = true // pay-what-you-want, one-time only
+	case !in.Amount.IsPositive():
+		// no amount supplied → pay-what-you-want (donor enters the amount)
+		priceParams.CustomAmount = true
+	case in.AmountEditable:
+		// amount supplied but editable → pre-filled preset the donor can change
+		priceParams.CustomAmount = true
+	default:
+		// one-time with a locked amount → charge exactly that amount (fixed price)
 	}
 	price, err := s.gw.CreatePrice(ctx, t.StripeAccountID, priceParams)
 	if err != nil {
 		return payment.PaymentLink{}, fmt.Errorf("create price: %w", err)
 	}
 
-	meta := map[string]string{"tenant_id": in.TenantID}
+	// Start with the caller's custom parameters, then set the reserved keys so
+	// our attribution/routing always wins over any collision.
+	meta := map[string]string{}
+	for k, v := range in.Metadata {
+		meta[k] = v
+	}
+	meta["tenant_id"] = in.TenantID
 	if in.ProductID != "" {
 		meta["product_id"] = in.ProductID
 	}
 	if in.CampaignID != "" {
 		meta["campaign_id"] = in.CampaignID
+	}
+	if in.WebhookURL != "" {
+		meta["webhook_url"] = in.WebhookURL
 	}
 	params := payment.CreatePaymentLinkParams{PriceID: price.ID, Mode: mode, Metadata: meta}
 	if in.DonorID != "" {

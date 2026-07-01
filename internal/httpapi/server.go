@@ -22,14 +22,23 @@ import (
 
 // Deps are the collaborators an HTTP server needs.
 type Deps struct {
-	Service       *app.Service
-	Router        *webhook.Router
-	Engine        *recon.Engine
-	Gateway       payment.Gateway
-	Store         store.Store
-	WebhookSecret string
-	Currency      string // reporting currency for the metrics dashboard
-	Logger        *slog.Logger
+	Service         *app.Service
+	Router          *webhook.Router
+	Engine          *recon.Engine
+	Gateway         payment.Gateway
+	Store           store.Store
+	WebhookSecret   string
+	Currency        string // reporting currency for the metrics dashboard
+	DefaultTenantID string // used when a request omits tenant_id
+	Logger          *slog.Logger
+}
+
+// tenantOr returns the request tenant id, or the configured default when empty.
+func (s *Server) tenantOr(id string) string {
+	if id == "" {
+		return s.deps.DefaultTenantID
+	}
+	return id
 }
 
 // Server holds dependencies and a route mux.
@@ -50,6 +59,7 @@ func NewServer(d Deps) *Server {
 	s.mux.HandleFunc("GET /health", s.health)
 	s.mux.HandleFunc("GET /{$}", s.health) // root also serves health
 	s.mux.HandleFunc("POST /v1/donations", s.startDonation)
+	s.mux.HandleFunc("POST /v1/payment-links", s.createPaymentLink)
 	s.mux.HandleFunc("POST /v1/webhooks/stripe", s.webhook)
 	s.mux.HandleFunc("GET /v1/metrics/tenants/{tenantID}/summary", s.tenantSummary)
 	s.mux.HandleFunc("POST /admin/reconcile", s.reconcile)
@@ -71,6 +81,7 @@ type startDonationReq struct {
 	Currency        string `json:"currency"`
 	PaymentMethodID string `json:"payment_method_id"`
 	IdempotencyKey  string `json:"idempotency_key"`
+	WebhookURL      string `json:"webhook_url"` // optional
 }
 
 func (s *Server) startDonation(w http.ResponseWriter, r *http.Request) {
@@ -80,9 +91,9 @@ func (s *Server) startDonation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pi, err := s.deps.Service.StartDonation(r.Context(), app.StartDonationInput{
-		TenantID: req.TenantID, DonorID: req.DonorID, ProductID: req.ProductID,
+		TenantID: s.tenantOr(req.TenantID), DonorID: req.DonorID, ProductID: req.ProductID,
 		Amount: money.New(req.Amount, req.Currency), PaymentMethodID: req.PaymentMethodID,
-		IdempotencyKey: req.IdempotencyKey,
+		IdempotencyKey: req.IdempotencyKey, WebhookURL: req.WebhookURL,
 	})
 	if err != nil {
 		writeError(w, statusForError(err), err)
@@ -92,6 +103,45 @@ func (s *Server) startDonation(w http.ResponseWriter, r *http.Request) {
 		"payment_intent_id": pi.ID,
 		"client_secret":     pi.ClientSecret,
 		"status":            pi.Status,
+	})
+}
+
+type createLinkReq struct {
+	TenantID       string            `json:"tenant_id"`
+	ProductName    string            `json:"product_name"`
+	ProductID      string            `json:"product_id"`
+	CustomerID     string            `json:"customer_id"` // donor id; optional, used to pre-fill the hosted page
+	Amount         int64             `json:"amount"`      // one-time: preset/min; subscription: fixed monthly
+	Currency       string            `json:"currency"`
+	Recurring      bool              `json:"recurring"`       // false = one-time custom amount, true = monthly
+	WebhookURL     string            `json:"webhook_url"`     // optional
+	Metadata       map[string]string `json:"metadata"`        // optional custom key/value parameters
+	EditableAmount bool              `json:"editable_amount"` // one-time: donor may edit the amount
+}
+
+func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
+	var req createLinkReq
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	cur := req.Currency
+	if cur == "" {
+		cur = s.deps.Currency
+	}
+	link, err := s.deps.Service.CreateDonationLink(r.Context(), app.LinkInput{
+		TenantID: s.tenantOr(req.TenantID), ProductName: req.ProductName, ProductID: req.ProductID,
+		Amount: money.New(req.Amount, cur), Recurring: req.Recurring, DonorID: req.CustomerID,
+		WebhookURL: req.WebhookURL, Metadata: req.Metadata, AmountEditable: req.EditableAmount,
+	})
+	if err != nil {
+		writeError(w, statusForError(err), err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":   link.ID,
+		"url":  link.URL,
+		"mode": link.Mode,
 	})
 }
 

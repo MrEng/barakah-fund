@@ -89,6 +89,59 @@ func TestWebhookDedup(t *testing.T) {
 	}
 }
 
+func TestForwardsToPerRequestWebhookURL(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	fwd := &ForwardRecorder{}
+	router := New(h.store, h.mail, nil, WithForwarder(fwd), WithDefaultWebhookURL("https://default.example/hook"))
+
+	pi, err := h.svc.StartDonation(ctx, app.StartDonationInput{
+		TenantID: "t1", DonorID: h.donor.ID, ProductID: "prod_1", Amount: money.New(4000, "USD"),
+		WebhookURL: "https://caller.example/notify",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := router.Handle(ctx, h.gw.Succeed("acct_1", pi.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if len(fwd.Calls) != 1 {
+		t.Fatalf("forward calls = %d, want 1", len(fwd.Calls))
+	}
+	c := fwd.Calls[0]
+	if c.URL != "https://caller.example/notify" {
+		t.Fatalf("forwarded to %s, want caller URL", c.URL)
+	}
+	if c.Notification.Status != string(domain.PaymentSucceeded) || c.Notification.PaymentIntentID != pi.ID {
+		t.Fatalf("notification = %+v", c.Notification)
+	}
+}
+
+func TestForwardsToDefaultWhenUnspecified(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	fwd := &ForwardRecorder{}
+	router := New(h.store, h.mail, nil, WithForwarder(fwd), WithDefaultWebhookURL("https://default.example/hook"))
+
+	pi := h.start(t) // no WebhookURL
+	if err := router.Handle(ctx, h.gw.Succeed("acct_1", pi.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if len(fwd.Calls) != 1 || fwd.Calls[0].URL != "https://default.example/hook" {
+		t.Fatalf("expected forward to default URL, got %+v", fwd.Calls)
+	}
+}
+
+func TestNoForwarderIsNoOp(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	pi := h.start(t)
+	// Router built with no forwarder (h.router) must not error on terminal events.
+	if err := h.router.Handle(ctx, h.gw.Succeed("acct_1", pi.ID)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWebhookBackfillsUnseenIntent(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()

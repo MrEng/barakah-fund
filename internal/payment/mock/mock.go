@@ -50,8 +50,9 @@ type Mock struct {
 	nextOutcome *domain.PaymentStatus
 	nextReason  string
 
-	// lastLink records the params of the most recent CreatePaymentLink (tests).
-	lastLink payment.CreatePaymentLinkParams
+	// lastLink / lastPrice record the params of the most recent calls (tests).
+	lastLink  payment.CreatePaymentLinkParams
+	lastPrice payment.CreatePriceParams
 }
 
 // LastLinkParams returns the params of the most recent CreatePaymentLink call.
@@ -59,6 +60,13 @@ func (m *Mock) LastLinkParams() payment.CreatePaymentLinkParams {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastLink
+}
+
+// LastPriceParams returns the params of the most recent CreatePrice call.
+func (m *Mock) LastPriceParams() payment.CreatePriceParams {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastPrice
 }
 
 // New builds a Mock with a real clock.
@@ -241,6 +249,7 @@ func (m *Mock) CreatePrice(_ context.Context, account string, p payment.CreatePr
 	defer m.mu.Unlock()
 	pr := payment.Price{ID: genID("price"), Amount: p.Amount, Interval: p.Interval, CustomAmount: p.CustomAmount}
 	m.acct(account).prices[pr.ID] = pr
+	m.lastPrice = p
 	return pr, nil
 }
 
