@@ -83,6 +83,12 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Background reconciliation loop (in-process). On Cloud Run this needs CPU
+	// always allocated (--no-cpu-throttling) and a warm instance
+	// (--min-instances>=1) to run reliably between requests.
+	go runReconLoop(ctx, engine, envDuration("RECON_INTERVAL", 6*time.Hour), logger)
+
 	<-ctx.Done()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -93,6 +99,44 @@ func main() {
 	logger.Info("stopped")
 }
 
+// runReconLoop runs reconciliation across all tenants on an interval until ctx
+// is cancelled. It does an immediate pass on startup, then ticks.
+func runReconLoop(ctx context.Context, engine *recon.Engine, interval time.Duration, logger *slog.Logger) {
+	if interval <= 0 {
+		logger.Info("reconciliation loop disabled")
+		return
+	}
+	logger.Info("reconciliation loop started", "interval", interval.String())
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	reconcile := func() {
+		to := time.Now()
+		from := to.Add(-24 * time.Hour)
+		reports, err := engine.ReconcileAll(ctx, from, to)
+		if err != nil {
+			logger.Error("reconciliation failed", "err", err)
+			return
+		}
+		backfilled := 0
+		for _, r := range reports {
+			backfilled += r.Backfilled
+		}
+		logger.Info("reconciliation completed", "tenants", len(reports), "backfilled", backfilled)
+	}
+
+	reconcile() // initial pass on startup
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("reconciliation loop stopped")
+			return
+		case <-ticker.C:
+			reconcile()
+		}
+	}
+}
+
 func buildGateway(logger *slog.Logger) payment.Gateway {
 	if key := os.Getenv("STRIPE_SECRET_KEY"); key != "" {
 		logger.Info("using stripe gateway")
@@ -100,6 +144,15 @@ func buildGateway(logger *slog.Logger) payment.Gateway {
 	}
 	logger.Warn("STRIPE_SECRET_KEY unset; using in-memory mock gateway")
 	return mock.New()
+}
+
+func envDuration(k string, def time.Duration) time.Duration {
+	if v := os.Getenv(k); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
 }
 
 func envStr(k, def string) string {
