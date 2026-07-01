@@ -1,0 +1,17 @@
+# Binaries and build output
+/bin/
+/dist/
+*.exe
+
+# Test / coverage artifacts
+*.out
+coverage.*
+
+# Local env and secrets
+.env
+*.local
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
