@@ -11,6 +11,7 @@ import (
 	"github.com/barakahfund/payments/internal/money"
 	"github.com/barakahfund/payments/internal/payment"
 	"github.com/barakahfund/payments/internal/store"
+	"github.com/barakahfund/payments/internal/telemetry"
 )
 
 // Report summarises one reconciliation pass.
@@ -24,17 +25,28 @@ type Report struct {
 
 // Engine reconciles a tenant over a time window.
 type Engine struct {
-	gw    payment.Gateway
-	store store.Store
-	now   func() time.Time
+	gw      payment.Gateway
+	store   store.Store
+	now     func() time.Time
+	metrics *telemetry.Metrics
 }
 
+// Option configures an Engine.
+type Option func(*Engine)
+
+// WithMetrics sets the telemetry recorder.
+func WithMetrics(m *telemetry.Metrics) Option { return func(e *Engine) { e.metrics = m } }
+
 // New builds an Engine.
-func New(gw payment.Gateway, st store.Store, now func() time.Time) *Engine {
+func New(gw payment.Gateway, st store.Store, now func() time.Time, opts ...Option) *Engine {
 	if now == nil {
 		now = time.Now
 	}
-	return &Engine{gw: gw, store: st, now: now}
+	e := &Engine{gw: gw, store: st, now: now}
+	for _, o := range opts {
+		o(e)
+	}
+	return e
 }
 
 // Reconcile pulls Stripe's authoritative data for [from,to] and converges the
@@ -98,6 +110,7 @@ func (e *Engine) Reconcile(ctx context.Context, t domain.Tenant, from, to time.T
 			rep.Updated++
 		}
 	}
+	e.metrics.RecordBackfill(ctx, t.ID, rep.Backfilled)
 	return rep, nil
 }
 

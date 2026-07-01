@@ -78,9 +78,9 @@ func TestLiveDeployedService(t *testing.T) {
 	ctx := context.Background()
 	// Empty TenantID → the server uses the default platform tenant (your Stripe account).
 
-	// One-time is pay-what-you-want: the amount is a suggestion only (donor types it).
+	// One-time with an editable preset: $50 is pre-filled but the donor can change it.
 	oneTime, err := c.OneTimePaymentLink(ctx, Request{
-		ProductName: "Water Wells", AmountMinor: 5000, Currency: "USD",
+		ProductName: "Water Wells", AmountMinor: 5000, Currency: "USD", AmountEditable: true,
 	})
 	if err != nil {
 		t.Fatalf("one-time: %v", err)

@@ -12,6 +12,7 @@ import (
 	"github.com/barakahfund/payments/internal/email"
 	"github.com/barakahfund/payments/internal/payment"
 	"github.com/barakahfund/payments/internal/store"
+	"github.com/barakahfund/payments/internal/telemetry"
 )
 
 // Router applies events to the store, sends failure emails, and forwards a
@@ -22,6 +23,7 @@ type Router struct {
 	now               func() time.Time
 	forwarder         Forwarder
 	defaultWebhookURL string
+	metrics           *telemetry.Metrics
 }
 
 // Option configures a Router.
@@ -29,6 +31,9 @@ type Option func(*Router)
 
 // WithForwarder sets the outbound webhook forwarder.
 func WithForwarder(f Forwarder) Option { return func(r *Router) { r.forwarder = f } }
+
+// WithMetrics sets the telemetry recorder.
+func WithMetrics(m *telemetry.Metrics) Option { return func(r *Router) { r.metrics = m } }
 
 // WithDefaultWebhookURL sets the fallback URL used when a request did not
 // specify its own webhook_url.
@@ -55,18 +60,22 @@ func (r *Router) Handle(ctx context.Context, e payment.Event) error {
 	if !first {
 		return nil // already processed
 	}
+	r.metrics.RecordEvent(ctx, string(e.Type))
 	switch e.Type {
 	case payment.EventPaymentSucceeded:
 		p, err := r.applyPaymentStatus(ctx, e, domain.PaymentSucceeded)
 		if err != nil {
 			return err
 		}
+		r.metrics.RecordDonation(ctx, p.TenantID, string(domain.PaymentSucceeded))
+		r.metrics.RecordCaptured(ctx, p.TenantID, p.Amount.Currency, p.Amount.Amount)
 		return r.forward(ctx, e, p)
 	case payment.EventPaymentFailed:
 		p, err := r.applyPaymentStatus(ctx, e, domain.PaymentFailed)
 		if err != nil {
 			return err
 		}
+		r.metrics.RecordDonation(ctx, p.TenantID, string(domain.PaymentFailed))
 		if err := r.emailFailure(ctx, p); err != nil {
 			return err
 		}

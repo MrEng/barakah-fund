@@ -17,6 +17,7 @@ import (
 	"github.com/barakahfund/payments/internal/payment"
 	"github.com/barakahfund/payments/internal/recon"
 	"github.com/barakahfund/payments/internal/store"
+	"github.com/barakahfund/payments/internal/telemetry"
 	"github.com/barakahfund/payments/internal/webhook"
 )
 
@@ -30,6 +31,7 @@ type Deps struct {
 	WebhookSecret   string
 	Currency        string // reporting currency for the metrics dashboard
 	DefaultTenantID string // used when a request omits tenant_id
+	Metrics         *telemetry.Metrics
 	Logger          *slog.Logger
 }
 
@@ -129,8 +131,9 @@ func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
 	if cur == "" {
 		cur = s.deps.Currency
 	}
+	tenantID := s.tenantOr(req.TenantID)
 	link, err := s.deps.Service.CreateDonationLink(r.Context(), app.LinkInput{
-		TenantID: s.tenantOr(req.TenantID), ProductName: req.ProductName, ProductID: req.ProductID,
+		TenantID: tenantID, ProductName: req.ProductName, ProductID: req.ProductID,
 		Amount: money.New(req.Amount, cur), Recurring: req.Recurring, DonorID: req.CustomerID,
 		WebhookURL: req.WebhookURL, Metadata: req.Metadata, AmountEditable: req.EditableAmount,
 	})
@@ -138,6 +141,7 @@ func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusForError(err), err)
 		return
 	}
+	s.deps.Metrics.RecordPaymentLink(r.Context(), tenantID, link.Mode)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":   link.ID,
 		"url":  link.URL,

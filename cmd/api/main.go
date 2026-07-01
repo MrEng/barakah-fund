@@ -21,6 +21,7 @@ import (
 	"github.com/barakahfund/payments/internal/payment/stripe"
 	"github.com/barakahfund/payments/internal/recon"
 	"github.com/barakahfund/payments/internal/store"
+	"github.com/barakahfund/payments/internal/telemetry"
 	"github.com/barakahfund/payments/internal/webhook"
 )
 
@@ -41,18 +42,31 @@ func main() {
 	})
 	logger.Info("seeded default tenant", "tenant_id", defaultTenantID, "mode", "platform-direct")
 
+	// Telemetry: export metrics to Cloud Monitoring (no-op if it can't initialise,
+	// e.g. running locally without credentials).
+	tel, shutdownTel, err := telemetry.Setup(context.Background(), os.Getenv("GOOGLE_CLOUD_PROJECT"))
+	if err != nil {
+		logger.Warn("metrics export disabled", "err", err)
+		tel = telemetry.NewNoop()
+	} else {
+		logger.Info("metrics export enabled (cloud monitoring)")
+		defer func() { _ = shutdownTel(context.Background()) }()
+	}
+
 	svc := app.New(gw, st, notifier, app.Options{ApplicationFeeBps: envInt("APPLICATION_FEE_BPS", 0)})
 	router := webhook.New(st, notifier, time.Now,
 		webhook.WithForwarder(webhook.NewHTTPForwarder()),
 		webhook.WithDefaultWebhookURL(os.Getenv("DEFAULT_WEBHOOK_URL")),
+		webhook.WithMetrics(tel),
 	)
-	engine := recon.New(gw, st, time.Now)
+	engine := recon.New(gw, st, time.Now, recon.WithMetrics(tel))
 
 	srv := httpapi.NewServer(httpapi.Deps{
 		Service: svc, Router: router, Engine: engine, Gateway: gw, Store: st,
 		WebhookSecret:   os.Getenv("STRIPE_WEBHOOK_SECRET"),
 		Currency:        envStr("REPORTING_CURRENCY", "USD"),
 		DefaultTenantID: defaultTenantID,
+		Metrics:         tel,
 		Logger:          logger,
 	})
 
