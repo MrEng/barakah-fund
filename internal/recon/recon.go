@@ -71,7 +71,7 @@ func (e *Engine) Reconcile(ctx context.Context, t domain.Tenant, from, to time.T
 		if inserted {
 			rep.Backfilled++
 		}
-		if tx.Type == "charge" {
+		if tx.Type == "charge" || tx.Type == "payment" {
 			backfilled, err := e.ensureSucceededPayment(ctx, t.ID, tx)
 			if err != nil {
 				return rep, err
