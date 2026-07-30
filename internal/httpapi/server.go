@@ -122,6 +122,7 @@ type createLinkReq struct {
 	ProductName    string            `json:"product_name"`
 	ProductID      string            `json:"product_id"`
 	CustomerID     string            `json:"customer_id"` // donor id; optional, used to pre-fill the hosted page
+	Email          string            `json:"email"`       // optional donor email; stamped into metadata + pre-fills the page
 	Amount         int64             `json:"amount"`      // one-time: preset/min; subscription: fixed monthly
 	Currency       string            `json:"currency"`
 	Recurring      bool              `json:"recurring"`       // false = one-time custom amount, true = monthly
@@ -143,7 +144,7 @@ func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
 	accountID := s.accountOr(req.AccountID)
 	link, err := s.deps.Service.CreateDonationLink(r.Context(), app.LinkInput{
 		AccountID: accountID, TenantID: req.TenantID, ProductName: req.ProductName, ProductID: req.ProductID,
-		Amount: money.New(req.Amount, cur), Recurring: req.Recurring, DonorID: req.CustomerID,
+		Amount: money.New(req.Amount, cur), Recurring: req.Recurring, DonorID: req.CustomerID, Email: req.Email,
 		WebhookURL: req.WebhookURL, Metadata: req.Metadata, AmountEditable: req.EditableAmount,
 	})
 	if err != nil {

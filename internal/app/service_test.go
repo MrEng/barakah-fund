@@ -171,7 +171,7 @@ func TestCreateDonationLinkSingleAndRecurring(t *testing.T) {
 	ctx := context.Background()
 	single, err := f.svc.CreateDonationLink(ctx, LinkInput{
 		AccountID: f.account.ID, TenantID: "org-77", ProductName: "Zakat", ProductID: "prod_zakat",
-		Amount: money.New(1000, "USD"), DonorID: f.donor.ID,
+		Amount: money.New(1000, "USD"), DonorID: f.donor.ID, Email: "giver@example.com",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -184,6 +184,9 @@ func TestCreateDonationLinkSingleAndRecurring(t *testing.T) {
 	lp := f.gw.LastLinkParams()
 	if lp.Metadata["account_id"] != f.account.ID || lp.Metadata["tenant_id"] != "org-77" || lp.Metadata["product_id"] != "prod_zakat" {
 		t.Fatalf("link metadata = %+v", lp.Metadata)
+	}
+	if lp.Metadata["email"] != "giver@example.com" {
+		t.Fatalf("email metadata = %q, want giver@example.com", lp.Metadata["email"])
 	}
 
 	// caller-supplied custom parameters ride through alongside reserved keys

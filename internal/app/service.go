@@ -153,6 +153,7 @@ func (s *Service) StartDonation(ctx context.Context, in StartDonationInput) (pay
 	}
 	meta := attribution(in.AccountID, in.TenantID)
 	meta["product_id"] = in.ProductID
+	meta["email"] = d.Email
 	if in.WebhookURL != "" {
 		meta["webhook_url"] = in.WebhookURL
 	}
@@ -285,6 +286,7 @@ type LinkInput struct {
 	Amount      money.Money // preset/min for custom; fixed for recurring
 	Recurring   bool
 	DonorID     string            // optional; when set, the link pre-fills the donor's email
+	Email       string            // optional donor email; stamped into metadata and pre-fills the hosted page
 	WebhookURL  string            // optional; caller's notification URL (else the default)
 	Metadata    map[string]string // optional custom parameters; ride through to the charge and webhooks
 
@@ -347,8 +349,13 @@ func (s *Service) CreateDonationLink(ctx context.Context, in LinkInput) (payment
 		meta["webhook_url"] = in.WebhookURL
 	}
 	params := payment.CreatePaymentLinkParams{PriceID: price.ID, Mode: mode, Metadata: meta}
+	if in.Email != "" {
+		meta["email"] = in.Email
+		params.PrefilledEmail = in.Email
+	}
 	if in.DonorID != "" {
 		if d, err := s.store.GetDonor(ctx, in.AccountID, in.DonorID); err == nil {
+			// the donor record is authoritative for prefill when both are given
 			params.PrefilledEmail = d.Email
 			params.ClientReferenceID = d.ID
 		}
