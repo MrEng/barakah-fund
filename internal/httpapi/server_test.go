@@ -94,6 +94,42 @@ func TestStartDonationEndpoint(t *testing.T) {
 	}
 }
 
+func TestFlatTopLevelFieldsBecomeMetadata(t *testing.T) {
+	srv, _, _ := newServer(t)
+	// attribution fields sent flat at the top level, no "metadata" wrapper
+	body := `{"account_id": "t1", "tenant_id": "019dd9ba-aabf-70f0-9029-3f3e04de720a",
+		"product_name": "Water Wells Donation", "email": "test@gmail.com",
+		"type": "donation", "item_type": "program", "item_id": 42,
+		"selection": {"project_id": 7, "plan_id": 3}, "frequency": "once",
+		"amount": 50, "currency": "cad", "reference": "my-unique-uuid-string", "mode": "test"}`
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/payment-links", bytes.NewBufferString(body)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		URL      string            `json:"url"`
+		TenantID string            `json:"tenant_id"`
+		Metadata map[string]string `json:"metadata"`
+	}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	m := resp.Metadata
+	if m["type"] != "donation" || m["item_type"] != "program" || m["item_id"] != "42" ||
+		m["selection"] != `{"plan_id":3,"project_id":7}` || m["frequency"] != "once" ||
+		m["reference"] != "my-unique-uuid-string" || m["mode"] != "test" {
+		t.Fatalf("metadata = %+v", m)
+	}
+	// known request fields must not leak into metadata
+	for _, k := range []string{"account_id", "tenant_id", "product_name", "email", "amount", "currency"} {
+		if _, ok := m[k]; ok {
+			t.Fatalf("known field %q leaked into metadata: %+v", k, m)
+		}
+	}
+	if resp.TenantID != "019dd9ba-aabf-70f0-9029-3f3e04de720a" || resp.URL == "" {
+		t.Fatalf("resp = %+v", resp)
+	}
+}
+
 func TestAccountIDRequired(t *testing.T) {
 	srv, _, d := newServer(t)
 	for _, tc := range []struct{ name, path, body string }{

@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/barakahfund/payments/internal/app"
@@ -115,18 +117,69 @@ func stringifyMetadata(in map[string]any) map[string]string {
 	return out
 }
 
+// jsonKeys lists a request struct's json field names, so any other top-level
+// key in a request body can be recognised as caller metadata.
+func jsonKeys(v any) map[string]bool {
+	keys := map[string]bool{}
+	t := reflect.TypeOf(v)
+	for i := 0; i < t.NumField(); i++ {
+		if name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ","); name != "" && name != "-" {
+			keys[name] = true
+		}
+	}
+	return keys
+}
+
+// decodeWithExtras decodes the body into req and returns every top-level field
+// that is not a known request field, stringified. Callers may send attribution
+// fields flat ("type": "donation", "reference": ...) instead of nesting them
+// under "metadata".
+func decodeWithExtras(r *http.Request, req any, known map[string]bool) (map[string]string, error) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(body, req); err != nil {
+		return nil, err
+	}
+	var raw map[string]any
+	_ = json.Unmarshal(body, &raw)
+	for k := range known {
+		delete(raw, k)
+	}
+	return stringifyMetadata(raw), nil
+}
+
+// mergeMeta overlays b onto a (b wins), allocating only when needed.
+func mergeMeta(a, b map[string]string) map[string]string {
+	if len(b) == 0 {
+		return a
+	}
+	if a == nil {
+		a = make(map[string]string, len(b))
+	}
+	for k, v := range b {
+		a[k] = v
+	}
+	return a
+}
+
+var donationKnownKeys = jsonKeys(startDonationReq{})
+
 func (s *Server) startDonation(w http.ResponseWriter, r *http.Request) {
 	var req startDonationReq
-	if err := readJSON(r, &req); err != nil {
+	extras, err := decodeWithExtras(r, &req, donationKnownKeys)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	// flat unknown fields plus the explicit metadata object (which wins)
+	meta := mergeMeta(extras, stringifyMetadata(req.Metadata))
 	accountID := s.accountOr(req.AccountID)
 	if accountID == "" {
 		writeError(w, http.StatusBadRequest, errAccountRequired)
 		return
 	}
-	meta := stringifyMetadata(req.Metadata)
 	pi, err := s.deps.Service.StartDonation(r.Context(), app.StartDonationInput{
 		AccountID: accountID, TenantID: req.TenantID, DonorID: req.DonorID, ProductID: req.ProductID,
 		Amount: money.New(req.Amount, req.Currency), PaymentMethodID: req.PaymentMethodID,
@@ -166,12 +219,17 @@ type createLinkReq struct {
 	EditableAmount bool           `json:"editable_amount"` // one-time: donor may edit the amount
 }
 
+var linkKnownKeys = jsonKeys(createLinkReq{})
+
 func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
 	var req createLinkReq
-	if err := readJSON(r, &req); err != nil {
+	extras, err := decodeWithExtras(r, &req, linkKnownKeys)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	// flat unknown fields plus the explicit metadata object (which wins)
+	meta := mergeMeta(extras, stringifyMetadata(req.Metadata))
 	cur := req.Currency
 	if cur == "" {
 		cur = s.deps.Currency
@@ -181,7 +239,6 @@ func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errAccountRequired)
 		return
 	}
-	meta := stringifyMetadata(req.Metadata)
 	link, err := s.deps.Service.CreateDonationLink(r.Context(), app.LinkInput{
 		AccountID: accountID, TenantID: req.TenantID, ProductName: req.ProductName, ProductID: req.ProductID,
 		Amount: money.New(req.Amount, cur), Recurring: req.Recurring, DonorID: req.CustomerID, Email: req.Email,
