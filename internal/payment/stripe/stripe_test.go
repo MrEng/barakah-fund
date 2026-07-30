@@ -49,12 +49,14 @@ func TestCreateCustomerSendsAccountHeaderAndForm(t *testing.T) {
 }
 
 func TestCreatePaymentIntentMapsResponse(t *testing.T) {
-	var gotAmount, gotCurrency, gotMeta string
+	var gotAmount, gotCurrency, gotMeta, gotAPM, gotRedirects string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()
 		gotAmount = r.Form.Get("amount")
 		gotCurrency = r.Form.Get("currency")
 		gotMeta = r.Form.Get("metadata[tenant_id]")
+		gotAPM = r.Form.Get("automatic_payment_methods[enabled]")
+		gotRedirects = r.Form.Get("automatic_payment_methods[allow_redirects]")
 		fmt.Fprint(w, `{"id":"pi_1","client_secret":"pi_1_secret","status":"requires_confirmation","amount":5000,"currency":"usd","customer":"cus_1"}`)
 	}))
 	defer srv.Close()
@@ -68,6 +70,10 @@ func TestCreatePaymentIntentMapsResponse(t *testing.T) {
 	}
 	if gotAmount != "5000" || gotCurrency != "usd" || gotMeta != "t1" {
 		t.Fatalf("form amount=%s currency=%s meta=%s", gotAmount, gotCurrency, gotMeta)
+	}
+	// client-completed intents accept every dashboard-enabled method
+	if gotAPM != "true" || gotRedirects != "always" {
+		t.Fatalf("automatic_payment_methods enabled=%q allow_redirects=%q, want true/always", gotAPM, gotRedirects)
 	}
 	if pi.Status != domain.PaymentRequested || pi.ClientSecret != "pi_1_secret" {
 		t.Fatalf("pi = %+v", pi)

@@ -43,6 +43,25 @@ func (r *recorder) get(k string) string {
 	return ""
 }
 
+func TestConfirmedIntentDisallowsRedirectMethods(t *testing.T) {
+	ctx := context.Background()
+	c, rec := routed(t, func(_ *http.Request) string {
+		return `{"id":"pi_1","client_secret":"pi_1_secret","status":"succeeded","amount":1000,"currency":"usd"}`
+	})
+	_, err := c.CreatePaymentIntent(ctx, "acct_1", payment.CreatePaymentIntentParams{
+		Amount: money.New(1000, "USD"), CustomerID: "cus_1", PaymentMethodID: "pm_1", Confirm: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// off-session server confirms cannot follow a browser redirect
+	if rec.get("automatic_payment_methods[enabled]") != "true" ||
+		rec.get("automatic_payment_methods[allow_redirects]") != "never" {
+		t.Fatalf("automatic_payment_methods = enabled %q redirects %q, want true/never",
+			rec.get("automatic_payment_methods[enabled]"), rec.get("automatic_payment_methods[allow_redirects]"))
+	}
+}
+
 func TestSetupIntentAndCards(t *testing.T) {
 	ctx := context.Background()
 	c, rec := routed(t, func(r *http.Request) string {

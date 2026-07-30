@@ -273,6 +273,16 @@ func (c *Client) CreatePaymentIntent(ctx context.Context, account string, p paym
 		form.Set("confirm", "true")
 		form.Set("off_session", "true")
 	}
+	// Accept every payment method enabled in the account's Dashboard, pinned
+	// explicitly rather than relying on the API-version default. Server-side
+	// confirms of a saved card cannot follow a browser redirect, so those
+	// restrict to non-redirect methods (the saved card qualifies).
+	form.Set("automatic_payment_methods[enabled]", "true")
+	if p.Confirm {
+		form.Set("automatic_payment_methods[allow_redirects]", "never")
+	} else {
+		form.Set("automatic_payment_methods[allow_redirects]", "always")
+	}
 	addMetadata(form, p.Metadata)
 	var out piJSON
 	if err := c.do(ctx, http.MethodPost, "/v1/payment_intents", account, form, &out); err != nil {
