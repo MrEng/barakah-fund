@@ -83,6 +83,25 @@ func TestStartDonationEndpoint(t *testing.T) {
 	}
 }
 
+func TestAccountIDRequired(t *testing.T) {
+	srv, _, d := newServer(t)
+	for _, tc := range []struct{ name, path, body string }{
+		{"donation", "/v1/donations", fmt.Sprintf(`{"donor_id":%q,"amount":5000,"currency":"USD"}`, d.ID)},
+		{"payment-link", "/v1/payment-links", `{"product_name":"Zakat","amount":5000,"currency":"USD"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, tc.path, bytes.NewBufferString(tc.body)))
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+			}
+			if !bytes.Contains(rr.Body.Bytes(), []byte("account_id is required")) {
+				t.Fatalf("body = %s, want account_id is required", rr.Body.String())
+			}
+		})
+	}
+}
+
 func TestCreatePaymentLinkEndpoint(t *testing.T) {
 	srv, _, d := newServer(t)
 	for _, tc := range []struct {

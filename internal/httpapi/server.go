@@ -44,6 +44,10 @@ func (s *Server) accountOr(id string) string {
 	return id
 }
 
+// errAccountRequired is returned when neither the request nor the server
+// configuration provides a Stripe account id.
+var errAccountRequired = errors.New("account_id is required")
+
 // Server holds dependencies and a route mux.
 type Server struct {
 	deps Deps
@@ -77,7 +81,7 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 type startDonationReq struct {
-	AccountID       string `json:"account_id"` // Stripe connected account (falls back to the default)
+	AccountID       string `json:"account_id"` // Stripe connected account (required; DEFAULT_ACCOUNT_ID fills it when configured)
 	TenantID        string `json:"tenant_id"`  // optional caller identifier, echoed back via metadata
 	DonorID         string `json:"donor_id"`
 	ProductID       string `json:"product_id"`
@@ -95,6 +99,10 @@ func (s *Server) startDonation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	accountID := s.accountOr(req.AccountID)
+	if accountID == "" {
+		writeError(w, http.StatusBadRequest, errAccountRequired)
+		return
+	}
 	pi, err := s.deps.Service.StartDonation(r.Context(), app.StartDonationInput{
 		AccountID: accountID, TenantID: req.TenantID, DonorID: req.DonorID, ProductID: req.ProductID,
 		Amount: money.New(req.Amount, req.Currency), PaymentMethodID: req.PaymentMethodID,
@@ -117,7 +125,7 @@ func (s *Server) startDonation(w http.ResponseWriter, r *http.Request) {
 }
 
 type createLinkReq struct {
-	AccountID      string            `json:"account_id"` // Stripe connected account (falls back to the default)
+	AccountID      string            `json:"account_id"` // Stripe connected account (required; DEFAULT_ACCOUNT_ID fills it when configured)
 	TenantID       string            `json:"tenant_id"`  // optional caller identifier, echoed back via metadata
 	ProductName    string            `json:"product_name"`
 	ProductID      string            `json:"product_id"`
@@ -142,6 +150,10 @@ func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
 		cur = s.deps.Currency
 	}
 	accountID := s.accountOr(req.AccountID)
+	if accountID == "" {
+		writeError(w, http.StatusBadRequest, errAccountRequired)
+		return
+	}
 	link, err := s.deps.Service.CreateDonationLink(r.Context(), app.LinkInput{
 		AccountID: accountID, TenantID: req.TenantID, ProductName: req.ProductName, ProductID: req.ProductID,
 		Amount: money.New(req.Amount, cur), Recurring: req.Recurring, DonorID: req.CustomerID, Email: req.Email,

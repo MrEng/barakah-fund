@@ -81,7 +81,7 @@ With `STRIPE_SECRET_KEY` set, the real Stripe adapter is used instead.
 | `PORT` | `8080` | provided by Cloud Run |
 | `STRIPE_SECRET_KEY` | — | if set, use real Stripe; else mock |
 | `STRIPE_WEBHOOK_SECRET` | — | webhook signing secret |
-| `DEFAULT_ACCOUNT_ID` | — | Stripe account used when a request omits `account_id`; empty = platform-direct |
+| `DEFAULT_ACCOUNT_ID` | — | Stripe account used when a request omits `account_id`; if unset too, the request is rejected (400) |
 | `REPORTING_CURRENCY` | `USD` | dashboard reporting currency |
 | `APPLICATION_FEE_BPS` | `0` | platform fee in basis points (100 = 1%) |
 
