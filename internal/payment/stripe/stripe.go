@@ -472,43 +472,55 @@ func withLinkQuery(raw string, p payment.CreatePaymentLinkParams) string {
 
 func (c *Client) ListBalanceTransactions(ctx context.Context, account string, from, to time.Time) ([]payment.BalanceTxn, error) {
 	form := windowForm(from, to)
-	var out struct {
-		Data []struct {
-			ID       string `json:"id"`
-			Type     string `json:"type"`
-			Amount   int64  `json:"amount"`
-			Fee      int64  `json:"fee"`
-			Currency string `json:"currency"`
-			Source   string `json:"source"`
-			Created  int64  `json:"created"`
-		} `json:"data"`
+	var txns []payment.BalanceTxn
+	for {
+		var out struct {
+			HasMore bool `json:"has_more"`
+			Data    []struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Amount   int64  `json:"amount"`
+				Fee      int64  `json:"fee"`
+				Currency string `json:"currency"`
+				Source   string `json:"source"`
+				Created  int64  `json:"created"`
+			} `json:"data"`
+		}
+		if err := c.do(ctx, http.MethodGet, "/v1/balance_transactions", account, form, &out); err != nil {
+			return nil, err
+		}
+		for _, d := range out.Data {
+			txns = append(txns, payment.BalanceTxn{
+				ID: d.ID, Type: d.Type, Amount: money.New(d.Amount, d.Currency),
+				Fee: money.New(d.Fee, d.Currency), SourceID: d.Source, Created: time.Unix(d.Created, 0).UTC(),
+			})
+		}
+		if !out.HasMore || len(out.Data) == 0 {
+			return txns, nil
+		}
+		form.Set("starting_after", out.Data[len(out.Data)-1].ID)
 	}
-	if err := c.do(ctx, http.MethodGet, "/v1/balance_transactions", account, form, &out); err != nil {
-		return nil, err
-	}
-	txns := make([]payment.BalanceTxn, 0, len(out.Data))
-	for _, d := range out.Data {
-		txns = append(txns, payment.BalanceTxn{
-			ID: d.ID, Type: d.Type, Amount: money.New(d.Amount, d.Currency),
-			Fee: money.New(d.Fee, d.Currency), SourceID: d.Source, Created: time.Unix(d.Created, 0).UTC(),
-		})
-	}
-	return txns, nil
 }
 
 func (c *Client) ListPaymentIntents(ctx context.Context, account string, from, to time.Time) ([]payment.PaymentIntent, error) {
 	form := windowForm(from, to)
-	var out struct {
-		Data []piJSON `json:"data"`
+	var pis []payment.PaymentIntent
+	for {
+		var out struct {
+			HasMore bool     `json:"has_more"`
+			Data    []piJSON `json:"data"`
+		}
+		if err := c.do(ctx, http.MethodGet, "/v1/payment_intents", account, form, &out); err != nil {
+			return nil, err
+		}
+		for _, d := range out.Data {
+			pis = append(pis, d.toDTO())
+		}
+		if !out.HasMore || len(out.Data) == 0 {
+			return pis, nil
+		}
+		form.Set("starting_after", out.Data[len(out.Data)-1].ID)
 	}
-	if err := c.do(ctx, http.MethodGet, "/v1/payment_intents", account, form, &out); err != nil {
-		return nil, err
-	}
-	pis := make([]payment.PaymentIntent, 0, len(out.Data))
-	for _, d := range out.Data {
-		pis = append(pis, d.toDTO())
-	}
-	return pis, nil
 }
 
 // --- Gateway: webhook signature verification ---

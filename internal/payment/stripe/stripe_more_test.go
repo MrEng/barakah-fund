@@ -43,6 +43,35 @@ func (r *recorder) get(k string) string {
 	return ""
 }
 
+func TestListBalanceTransactionsPaginates(t *testing.T) {
+	ctx := context.Background()
+	page := 0
+	var gotCursors []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		gotCursors = append(gotCursors, r.Form.Get("starting_after"))
+		page++
+		if page == 1 {
+			fmt.Fprint(w, `{"has_more":true,"data":[{"id":"txn_1","type":"charge","amount":100,"fee":3,"currency":"usd","source":"pi_1","created":1750000000},{"id":"txn_2","type":"charge","amount":200,"fee":6,"currency":"usd","source":"pi_2","created":1750000001}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"has_more":false,"data":[{"id":"txn_3","type":"charge","amount":300,"fee":9,"currency":"usd","source":"pi_3","created":1750000002}]}`)
+	}))
+	defer srv.Close()
+
+	c := New("sk", WithBaseURL(srv.URL))
+	txns, err := c.ListBalanceTransactions(ctx, "acct_1", time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(txns) != 3 || txns[0].ID != "txn_1" || txns[2].ID != "txn_3" {
+		t.Fatalf("txns = %+v", txns)
+	}
+	if len(gotCursors) != 2 || gotCursors[0] != "" || gotCursors[1] != "txn_2" {
+		t.Fatalf("cursors = %v, want [\"\", txn_2]", gotCursors)
+	}
+}
+
 func TestConfirmedIntentDisallowsRedirectMethods(t *testing.T) {
 	ctx := context.Background()
 	c, rec := routed(t, func(_ *http.Request) string {
