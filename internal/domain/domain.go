@@ -37,8 +37,10 @@ const (
 	SourceReconciliation Source = "reconciliation"
 )
 
-// Tenant is a donation-collecting organization backed by a Stripe connected account.
-type Tenant struct {
+// Account is a donation-collecting organization backed by a Stripe connected
+// account. The caller's own tenant identifier is not modelled here; it rides
+// through Stripe metadata (`tenant_id`) purely for attribution.
+type Account struct {
 	ID              string
 	Name            string
 	StripeAccountID string
@@ -46,10 +48,10 @@ type Tenant struct {
 	PayoutsEnabled  bool
 }
 
-// Donor is a giver, mapped to a Stripe customer scoped to the tenant account.
+// Donor is a giver, mapped to a Stripe customer scoped to the connected account.
 type Donor struct {
 	ID               string
-	TenantID         string
+	AccountID        string
 	Email            string
 	Name             string
 	StripeCustomerID string
@@ -68,7 +70,7 @@ type Card struct {
 // Product is a campaign or cause donations are directed to.
 type Product struct {
 	ID              string
-	TenantID        string
+	AccountID       string
 	StripeProductID string
 	Name            string
 	CampaignID      string
@@ -85,7 +87,7 @@ type Price struct {
 
 // Payment is one donation attempt (every attempt is stored, including failures).
 type Payment struct {
-	TenantID              string
+	AccountID             string
 	DonorID               string
 	ProductID             string
 	StripePaymentIntentID string
@@ -101,7 +103,7 @@ type Payment struct {
 
 // Subscription is a recurring donation projection.
 type Subscription struct {
-	TenantID             string
+	AccountID            string
 	DonorID              string
 	ProductID            string
 	StripeSubscriptionID string
@@ -112,7 +114,7 @@ type Subscription struct {
 
 // LedgerEntry mirrors a Stripe balance transaction (authoritative money movement).
 type LedgerEntry struct {
-	TenantID           string
+	AccountID          string
 	StripeBalanceTxnID string
 	Type               string // charge, refund, adjustment, ...
 	Amount             money.Money

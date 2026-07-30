@@ -55,7 +55,7 @@ adapter and the stateful mock. Application services depend only on the interface
 
 ```
 /cmd/api
-/internal/domain          entities + value objects (Money, TenantID, Donor, Card, Subscription…)
+/internal/domain          entities + value objects (Money, AccountID, Donor, Card, Subscription…)
 /internal/payment         PaymentGateway interface + shared DTOs        <- the port
 /internal/payment/stripe  real adapter (one file per resource)
 /internal/payment/mock    stateful in-memory fake
@@ -86,8 +86,9 @@ adapter and the stateful mock. Application services depend only on the interface
   product; create-or-reuse by amount to avoid price proliferation.
 - Products/prices can be created inline (`price_data` + `product_data`) but we prefer **durable**
   per-campaign objects for clean per-tenant reporting.
-- Always stamp `tenant_id` and `product_id`/`campaign_id` in Stripe **metadata** so reporting never
-  depends on which price was used.
+- Always stamp `account_id` and `product_id`/`campaign_id` in Stripe **metadata** so reporting never
+  depends on which price was used. A caller-supplied `tenant_id` is stamped alongside them — it is
+  never used for routing, only echoed back in results and webhook notifications.
 
 ---
 
@@ -175,7 +176,7 @@ compliance, or good UX and are easy to omit:
 
 ### A. One-off donation, custom amount
 1. Client asks server to start a donation to a product.
-2. Server `CreatePaymentIntent(amount, cus_id, receipt_email, metadata{tenant,product})`.
+2. Server `CreatePaymentIntent(amount, cus_id, receipt_email, metadata{account,product})`.
 3. Server returns `client_secret`; client confirms with Stripe.js (direct to Stripe, handles SCA).
 4. Success/failure recorded via webhook; donor emailed (see §8); client polls for its own UX.
 
@@ -248,7 +249,7 @@ Idempotent upsert by Stripe id; converges with whatever webhooks already wrote.
 
 - **Scheduled (every 6h):** calls `Reconcile(now-24h, now)` for each tenant. The 24h window on a 6h
   cadence gives 4× overlap so a failed run or late-settling transaction is caught by later runs.
-- **External API:** `POST /admin/reconcile { tenant_id?, from, to }` — arbitrary range for backfills,
+- **External API:** `POST /admin/reconcile { account_id?, from, to }` — arbitrary range for backfills,
   investigations, or importing a tenant's history. **Async**: returns a job id, runs in background,
   produces the same `Report`. Admin-auth only. Cap absurd ranges; auto-page results.
 
@@ -317,10 +318,10 @@ Dashboard API (read-only, aggregation over the projection):
 
 | Endpoint | Returns |
 |---|---|
-| `GET /metrics/tenants/{tenant_id}/summary?from&to` | success_count, failure_count, success_rate, amount_requested, amount_captured, refunded, per-currency breakdown |
-| `GET /metrics/tenants/{tenant_id}/products?from&to` | the same, grouped per product/campaign |
+| `GET /metrics/accounts/{account_id}/summary?from&to` | success_count, failure_count, success_rate, amount_requested, amount_captured, refunded, per-currency breakdown |
+| `GET /metrics/accounts/{account_id}/products?from&to` | the same, grouped per product/campaign |
 | `GET /metrics/products/{product_id}?from&to` | one product across time |
-| `GET /metrics/tenants/{tenant_id}/timeseries?from&to&bucket=day` | requested/captured/failed per bucket for charts |
+| `GET /metrics/accounts/{account_id}/timeseries?from&to&bucket=day` | requested/captured/failed per bucket for charts |
 | `GET /metrics/overview?from&to` | platform-wide totals + top tenants (admin only) |
 
 Dashboard UI: a per-tenant view (success vs failure, requested vs captured, top campaigns, trend
@@ -384,7 +385,7 @@ zero — so the "loop" is **externally triggered**, not an in-process timer. Rec
 1. **Cloud Scheduler** fires every 6h and hits an authenticated **dispatcher** endpoint (OIDC token)
    or publishes a "start reconciliation" message.
 2. The **dispatcher** enumerates tenants from the `tenants` table and **publishes one Pub/Sub message
-   per tenant** (`{tenant_id, from=now-24h, to=now}`).
+   per account** (`{account_id, from=now-24h, to=now}`).
 3. A **Cloud Run push subscription** invokes the worker once per message; the worker runs
    `Reconcile(tenant, from, to)`. Tenants process **in parallel**, each independently retried.
 4. Pub/Sub **at-least-once delivery** may re-invoke a tenant — harmless, because reconciliation writes
@@ -404,34 +405,34 @@ per-tenant messages. Either way, the schedule lives in Cloud Scheduler, never in
 
 ## 12. Data model (tenant-scoped)
 
-`tenant_id` on every table; repositories enforce it on every query.
+`account_id` on every table; repositories enforce it on every query.
 
 - `tenants` (stripe_account_id, charges_enabled, payouts_enabled, email_settings_ok, status)
-- `donors` (tenant_id, stripe_customer_id, email, name?, address?, country?, marketing_consent,
-  anonymized_at?, unique(tenant_id, email))
+- `donors` (account_id, stripe_customer_id, email, name?, address?, country?, marketing_consent,
+  anonymized_at?, unique(account_id, email))
 - `cards` (donor_id, stripe_pm_id, brand, last4, exp, is_default)
-- `products` (tenant_id, stripe_product_id, name, campaign_id)
+- `products` (account_id, stripe_product_id, name, campaign_id)
 - `prices` (product_id, stripe_price_id, amount_minor, currency, interval, is_custom_amount,
   min_minor?, max_minor?)
-- `payments` (tenant_id, donor_id, product_id, subscription_id?, stripe_payment_intent_id,
+- `payments` (account_id, donor_id, product_id, subscription_id?, stripe_payment_intent_id,
   stripe_charge_id?, stripe_balance_txn_id?, amount_minor, currency, status[requested|succeeded|
   failed|canceled], failure_code?, payment_method_type?, application_fee_minor, source[webhook|
   reconciliation], metadata) — **every attempt, including failures**, feeds metrics
-- `subscriptions` (tenant_id, donor_id, product_id, stripe_subscription_id, price_id, status,
+- `subscriptions` (account_id, donor_id, product_id, stripe_subscription_id, price_id, status,
   current_period_end, cancel_at?, pause_reason?)
-- `payment_links` (tenant_id, stripe_link_id, url, mode, active)
+- `payment_links` (account_id, stripe_link_id, url, mode, active)
 - `refunds` (payment_id, stripe_refund_id, amount_minor, reason?)
 - `disputes` (payment_id, stripe_dispute_id, status, amount_minor, evidence_due_by?)
-- `ledger_entries` (tenant_id, stripe_balance_txn_id UNIQUE, type, amount_minor, currency, fee_minor)
+- `ledger_entries` (account_id, stripe_balance_txn_id UNIQUE, type, amount_minor, currency, fee_minor)
 - `webhook_events` (stripe_event_id UNIQUE, type, processed_at) — dedup
 - `outbox` (id, aggregate, payload, status, attempts) — transactional outbox for emails/events
-- `email_log` (tenant_id, donor_id, payment_id?, type[success|failure|dunning], provider_id, status,
+- `email_log` (account_id, donor_id, payment_id?, type[success|failure|dunning], provider_id, status,
   sent_at) — powers the "failure-email-not-sent" alert
-- `audit_log` (actor, role, action, target, tenant_id, at) — admin actions (refund, reconcile, access)
-- `metric_rollups_daily` (tenant_id, product_id, day, requested_minor, captured_minor, failed_minor,
+- `audit_log` (actor, role, action, target, account_id, at) — admin actions (refund, reconcile, access)
+- `metric_rollups_daily` (account_id, product_id, day, requested_minor, captured_minor, failed_minor,
   refunded_minor, counts…) — precomputed dashboard aggregates (see §17)
 - `idempotency_keys` (key, request_hash, response, expires_at)
-- `recon_runs` (tenant_id, from, to, scanned, backfilled, updated, flagged, job_id, started_at,
+- `recon_runs` (account_id, from, to, scanned, backfilled, updated, flagged, job_id, started_at,
   finished_at)
 
 Every table carries `created_at` / `updated_at`. Money is always `int64` minor units + currency code.
@@ -487,10 +488,10 @@ Never float.
 
 ### Tenant isolation (the top risk)
 This is a multi-tenant money system; a cross-tenant leak is the worst-case bug.
-- Auth tokens carry `tenant_id` + `role` (donor / tenant-admin / platform-admin). The
+- Auth tokens carry `account_id` + `role` (donor / tenant-admin / platform-admin). The
   `Stripe-Account` header and every DB query derive the tenant from the **token**, never from a
   client-supplied path/body value.
-- **IDOR guard**: dashboard/payment endpoints take `{tenant_id}` in the path — the middleware must
+- **IDOR guard**: dashboard/payment endpoints take `{account_id}` in the path — the middleware must
   verify the caller owns that tenant and reject mismatches. Same for donor-owned objects (a donor may
   only touch their own `cus_`/cards/payments).
 - `reconcile` and `/metrics/overview` are **platform-admin only**.

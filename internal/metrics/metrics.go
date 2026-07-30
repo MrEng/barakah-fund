@@ -1,4 +1,4 @@
-// Package metrics aggregates the payments projection into per-tenant and
+// Package metrics aggregates the payments projection into per-account and
 // per-product business metrics for the dashboard API. It reads the store (kept
 // correct by webhooks + reconciliation), never counters, so results stay
 // accurate after reconciliation.
@@ -30,13 +30,13 @@ type Aggregator struct {
 	currency string
 }
 
-// New builds an Aggregator. currency is the tenant's reporting currency.
+// New builds an Aggregator. currency is the account's reporting currency.
 func New(st store.Store, currency string) *Aggregator {
 	return &Aggregator{store: st, currency: currency}
 }
 
-// TenantSummary aggregates all of a tenant's payments in a window.
-func (a *Aggregator) TenantSummary(ctx context.Context, f store.PaymentFilter) (Summary, error) {
+// AccountSummary aggregates all of an account's payments in a window.
+func (a *Aggregator) AccountSummary(ctx context.Context, f store.PaymentFilter) (Summary, error) {
 	payments, err := a.store.ListPayments(ctx, f)
 	if err != nil {
 		return Summary{}, err
@@ -44,7 +44,7 @@ func (a *Aggregator) TenantSummary(ctx context.Context, f store.PaymentFilter) (
 	return Summarize(payments, a.currency), nil
 }
 
-// ByProduct groups a tenant's payments by product id.
+// ByProduct groups an account's payments by product id.
 func (a *Aggregator) ByProduct(ctx context.Context, f store.PaymentFilter) (map[string]Summary, error) {
 	payments, err := a.store.ListPayments(ctx, f)
 	if err != nil {

@@ -46,12 +46,12 @@ func TestAggregatorByProduct(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
 	for i, p := range payments() {
-		p.TenantID = "t1"
+		p.AccountID = "t1"
 		p.StripePaymentIntentID = "pi_" + string(rune('a'+i))
 		st.UpsertPayment(ctx, p)
 	}
 	agg := New(st, "USD")
-	groups, err := agg.ByProduct(ctx, store.PaymentFilter{TenantID: "t1"})
+	groups, err := agg.ByProduct(ctx, store.PaymentFilter{AccountID: "t1"})
 	if err != nil {
 		t.Fatal(err)
 	}

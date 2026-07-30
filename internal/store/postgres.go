@@ -38,14 +38,38 @@ func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 // Close releases the connection pool.
 func (p *Postgres) Close() { p.pool.Close() }
 
-// Migrate creates tables if they do not exist.
+// Migrate creates tables if they do not exist, first renaming any legacy
+// tenant-named tables/columns from before the account_id rename.
 func (p *Postgres) Migrate(ctx context.Context) error {
+	if _, err := p.pool.Exec(ctx, renameSQL); err != nil {
+		return err
+	}
 	_, err := p.pool.Exec(ctx, schemaSQL)
 	return err
 }
 
+// renameSQL migrates databases created before tenant_id was renamed to
+// account_id. Each rename is a no-op when the old name is already gone.
+const renameSQL = `
+DO $$ BEGIN
+	ALTER TABLE tenants RENAME TO accounts;
+EXCEPTION WHEN undefined_table THEN NULL; END $$;
+DO $$ BEGIN
+	ALTER TABLE donors RENAME COLUMN tenant_id TO account_id;
+EXCEPTION WHEN undefined_table OR undefined_column THEN NULL; END $$;
+DO $$ BEGIN
+	ALTER TABLE payments RENAME COLUMN tenant_id TO account_id;
+EXCEPTION WHEN undefined_table OR undefined_column THEN NULL; END $$;
+DO $$ BEGIN
+	ALTER TABLE subscriptions RENAME COLUMN tenant_id TO account_id;
+EXCEPTION WHEN undefined_table OR undefined_column THEN NULL; END $$;
+DO $$ BEGIN
+	ALTER TABLE ledger_entries RENAME COLUMN tenant_id TO account_id;
+EXCEPTION WHEN undefined_table OR undefined_column THEN NULL; END $$;
+`
+
 const schemaSQL = `
-CREATE TABLE IF NOT EXISTS tenants (
+CREATE TABLE IF NOT EXISTS accounts (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL DEFAULT '',
 	stripe_account_id TEXT NOT NULL DEFAULT '',
@@ -53,16 +77,16 @@ CREATE TABLE IF NOT EXISTS tenants (
 	payouts_enabled BOOLEAN NOT NULL DEFAULT false
 );
 CREATE TABLE IF NOT EXISTS donors (
-	tenant_id TEXT NOT NULL,
+	account_id TEXT NOT NULL,
 	id TEXT NOT NULL,
 	email TEXT NOT NULL DEFAULT '',
 	name TEXT NOT NULL DEFAULT '',
 	stripe_customer_id TEXT NOT NULL DEFAULT '',
-	PRIMARY KEY (tenant_id, id)
+	PRIMARY KEY (account_id, id)
 );
-CREATE INDEX IF NOT EXISTS donors_email_idx ON donors (tenant_id, email);
+CREATE INDEX IF NOT EXISTS donors_email_idx ON donors (account_id, email);
 CREATE TABLE IF NOT EXISTS payments (
-	tenant_id TEXT NOT NULL,
+	account_id TEXT NOT NULL,
 	stripe_payment_intent_id TEXT NOT NULL,
 	donor_id TEXT NOT NULL DEFAULT '',
 	product_id TEXT NOT NULL DEFAULT '',
@@ -74,22 +98,22 @@ CREATE TABLE IF NOT EXISTS payments (
 	failure_reason TEXT NOT NULL DEFAULT '',
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-	PRIMARY KEY (tenant_id, stripe_payment_intent_id)
+	PRIMARY KEY (account_id, stripe_payment_intent_id)
 );
-CREATE INDEX IF NOT EXISTS payments_product_idx ON payments (tenant_id, product_id);
+CREATE INDEX IF NOT EXISTS payments_product_idx ON payments (account_id, product_id);
 CREATE TABLE IF NOT EXISTS subscriptions (
-	tenant_id TEXT NOT NULL,
+	account_id TEXT NOT NULL,
 	stripe_subscription_id TEXT NOT NULL,
 	donor_id TEXT NOT NULL DEFAULT '',
 	product_id TEXT NOT NULL DEFAULT '',
 	price_id TEXT NOT NULL DEFAULT '',
 	status TEXT NOT NULL DEFAULT '',
 	current_period_end TIMESTAMPTZ NOT NULL DEFAULT now(),
-	PRIMARY KEY (tenant_id, stripe_subscription_id)
+	PRIMARY KEY (account_id, stripe_subscription_id)
 );
 CREATE TABLE IF NOT EXISTS ledger_entries (
 	stripe_balance_txn_id TEXT PRIMARY KEY,
-	tenant_id TEXT NOT NULL,
+	account_id TEXT NOT NULL,
 	type TEXT NOT NULL DEFAULT '',
 	amount_minor BIGINT NOT NULL DEFAULT 0,
 	currency TEXT NOT NULL DEFAULT '',
@@ -107,11 +131,11 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 );
 `
 
-// --- tenants ---
+// --- accounts ---
 
-func (p *Postgres) SaveTenant(ctx context.Context, t domain.Tenant) error {
+func (p *Postgres) SaveAccount(ctx context.Context, t domain.Account) error {
 	_, err := p.pool.Exec(ctx, `
-		INSERT INTO tenants (id, name, stripe_account_id, charges_enabled, payouts_enabled)
+		INSERT INTO accounts (id, name, stripe_account_id, charges_enabled, payouts_enabled)
 		VALUES ($1,$2,$3,$4,$5)
 		ON CONFLICT (id) DO UPDATE SET
 			name=EXCLUDED.name, stripe_account_id=EXCLUDED.stripe_account_id,
@@ -120,27 +144,27 @@ func (p *Postgres) SaveTenant(ctx context.Context, t domain.Tenant) error {
 	return err
 }
 
-func (p *Postgres) GetTenant(ctx context.Context, id string) (domain.Tenant, error) {
-	var t domain.Tenant
+func (p *Postgres) GetAccount(ctx context.Context, id string) (domain.Account, error) {
+	var t domain.Account
 	err := p.pool.QueryRow(ctx,
-		`SELECT id, name, stripe_account_id, charges_enabled, payouts_enabled FROM tenants WHERE id=$1`, id).
+		`SELECT id, name, stripe_account_id, charges_enabled, payouts_enabled FROM accounts WHERE id=$1`, id).
 		Scan(&t.ID, &t.Name, &t.StripeAccountID, &t.ChargesEnabled, &t.PayoutsEnabled)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Tenant{}, ErrNotFound
+		return domain.Account{}, ErrNotFound
 	}
 	return t, err
 }
 
-func (p *Postgres) ListTenants(ctx context.Context) ([]domain.Tenant, error) {
+func (p *Postgres) ListAccounts(ctx context.Context) ([]domain.Account, error) {
 	rows, err := p.pool.Query(ctx,
-		`SELECT id, name, stripe_account_id, charges_enabled, payouts_enabled FROM tenants`)
+		`SELECT id, name, stripe_account_id, charges_enabled, payouts_enabled FROM accounts`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []domain.Tenant
+	var out []domain.Account
 	for rows.Next() {
-		var t domain.Tenant
+		var t domain.Account
 		if err := rows.Scan(&t.ID, &t.Name, &t.StripeAccountID, &t.ChargesEnabled, &t.PayoutsEnabled); err != nil {
 			return nil, err
 		}
@@ -153,29 +177,29 @@ func (p *Postgres) ListTenants(ctx context.Context) ([]domain.Tenant, error) {
 
 func (p *Postgres) SaveDonor(ctx context.Context, d domain.Donor) error {
 	_, err := p.pool.Exec(ctx, `
-		INSERT INTO donors (tenant_id, id, email, name, stripe_customer_id)
+		INSERT INTO donors (account_id, id, email, name, stripe_customer_id)
 		VALUES ($1,$2,$3,$4,$5)
-		ON CONFLICT (tenant_id, id) DO UPDATE SET
+		ON CONFLICT (account_id, id) DO UPDATE SET
 			email=EXCLUDED.email, name=EXCLUDED.name, stripe_customer_id=EXCLUDED.stripe_customer_id`,
-		d.TenantID, d.ID, d.Email, d.Name, d.StripeCustomerID)
+		d.AccountID, d.ID, d.Email, d.Name, d.StripeCustomerID)
 	return err
 }
 
-func (p *Postgres) GetDonor(ctx context.Context, tenantID, donorID string) (domain.Donor, error) {
+func (p *Postgres) GetDonor(ctx context.Context, accountID, donorID string) (domain.Donor, error) {
 	return p.scanDonor(ctx,
-		`SELECT tenant_id, id, email, name, stripe_customer_id FROM donors WHERE tenant_id=$1 AND id=$2`,
-		tenantID, donorID)
+		`SELECT account_id, id, email, name, stripe_customer_id FROM donors WHERE account_id=$1 AND id=$2`,
+		accountID, donorID)
 }
 
-func (p *Postgres) FindDonorByEmail(ctx context.Context, tenantID, email string) (domain.Donor, error) {
+func (p *Postgres) FindDonorByEmail(ctx context.Context, accountID, email string) (domain.Donor, error) {
 	return p.scanDonor(ctx,
-		`SELECT tenant_id, id, email, name, stripe_customer_id FROM donors WHERE tenant_id=$1 AND email=$2 LIMIT 1`,
-		tenantID, email)
+		`SELECT account_id, id, email, name, stripe_customer_id FROM donors WHERE account_id=$1 AND email=$2 LIMIT 1`,
+		accountID, email)
 }
 
 func (p *Postgres) scanDonor(ctx context.Context, q string, args ...any) (domain.Donor, error) {
 	var d domain.Donor
-	err := p.pool.QueryRow(ctx, q, args...).Scan(&d.TenantID, &d.ID, &d.Email, &d.Name, &d.StripeCustomerID)
+	err := p.pool.QueryRow(ctx, q, args...).Scan(&d.AccountID, &d.ID, &d.Email, &d.Name, &d.StripeCustomerID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Donor{}, ErrNotFound
 	}
@@ -186,24 +210,24 @@ func (p *Postgres) scanDonor(ctx context.Context, q string, args ...any) (domain
 
 func (p *Postgres) UpsertPayment(ctx context.Context, pm domain.Payment) error {
 	_, err := p.pool.Exec(ctx, `
-		INSERT INTO payments (tenant_id, stripe_payment_intent_id, donor_id, product_id,
+		INSERT INTO payments (account_id, stripe_payment_intent_id, donor_id, product_id,
 			amount_minor, currency, status, application_fee_minor, source, failure_reason, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-		ON CONFLICT (tenant_id, stripe_payment_intent_id) DO UPDATE SET
+		ON CONFLICT (account_id, stripe_payment_intent_id) DO UPDATE SET
 			donor_id=EXCLUDED.donor_id, product_id=EXCLUDED.product_id, amount_minor=EXCLUDED.amount_minor,
 			currency=EXCLUDED.currency, status=EXCLUDED.status, application_fee_minor=EXCLUDED.application_fee_minor,
 			source=EXCLUDED.source, failure_reason=EXCLUDED.failure_reason, updated_at=EXCLUDED.updated_at`,
-		pm.TenantID, pm.StripePaymentIntentID, pm.DonorID, pm.ProductID, pm.Amount.Amount, pm.Amount.Currency,
+		pm.AccountID, pm.StripePaymentIntentID, pm.DonorID, pm.ProductID, pm.Amount.Amount, pm.Amount.Currency,
 		string(pm.Status), pm.ApplicationFee.Amount, string(pm.Source), pm.FailureReason,
 		nz(pm.CreatedAt), nz(pm.UpdatedAt))
 	return err
 }
 
-func (p *Postgres) GetPayment(ctx context.Context, tenantID, piID string) (domain.Payment, error) {
+func (p *Postgres) GetPayment(ctx context.Context, accountID, piID string) (domain.Payment, error) {
 	row := p.pool.QueryRow(ctx, `
-		SELECT tenant_id, stripe_payment_intent_id, donor_id, product_id, amount_minor, currency,
+		SELECT account_id, stripe_payment_intent_id, donor_id, product_id, amount_minor, currency,
 			status, application_fee_minor, source, failure_reason, created_at, updated_at
-		FROM payments WHERE tenant_id=$1 AND stripe_payment_intent_id=$2`, tenantID, piID)
+		FROM payments WHERE account_id=$1 AND stripe_payment_intent_id=$2`, accountID, piID)
 	pm, err := scanPayment(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Payment{}, ErrNotFound
@@ -212,10 +236,10 @@ func (p *Postgres) GetPayment(ctx context.Context, tenantID, piID string) (domai
 }
 
 func (p *Postgres) ListPayments(ctx context.Context, f PaymentFilter) ([]domain.Payment, error) {
-	q := `SELECT tenant_id, stripe_payment_intent_id, donor_id, product_id, amount_minor, currency,
+	q := `SELECT account_id, stripe_payment_intent_id, donor_id, product_id, amount_minor, currency,
 			status, application_fee_minor, source, failure_reason, created_at, updated_at
-		FROM payments WHERE tenant_id=$1`
-	args := []any{f.TenantID}
+		FROM payments WHERE account_id=$1`
+	args := []any{f.AccountID}
 	if f.ProductID != "" {
 		args = append(args, f.ProductID)
 		q += " AND product_id=$2"
@@ -252,7 +276,7 @@ func scanPayment(row scanner) (domain.Payment, error) {
 	var pm domain.Payment
 	var amount, fee int64
 	var currency, status, source string
-	if err := row.Scan(&pm.TenantID, &pm.StripePaymentIntentID, &pm.DonorID, &pm.ProductID,
+	if err := row.Scan(&pm.AccountID, &pm.StripePaymentIntentID, &pm.DonorID, &pm.ProductID,
 		&amount, &currency, &status, &fee, &source, &pm.FailureReason, &pm.CreatedAt, &pm.UpdatedAt); err != nil {
 		return domain.Payment{}, err
 	}
@@ -267,12 +291,12 @@ func scanPayment(row scanner) (domain.Payment, error) {
 
 func (p *Postgres) UpsertSubscription(ctx context.Context, s domain.Subscription) error {
 	_, err := p.pool.Exec(ctx, `
-		INSERT INTO subscriptions (tenant_id, stripe_subscription_id, donor_id, product_id, price_id, status, current_period_end)
+		INSERT INTO subscriptions (account_id, stripe_subscription_id, donor_id, product_id, price_id, status, current_period_end)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
-		ON CONFLICT (tenant_id, stripe_subscription_id) DO UPDATE SET
+		ON CONFLICT (account_id, stripe_subscription_id) DO UPDATE SET
 			donor_id=EXCLUDED.donor_id, product_id=EXCLUDED.product_id, price_id=EXCLUDED.price_id,
 			status=EXCLUDED.status, current_period_end=EXCLUDED.current_period_end`,
-		s.TenantID, s.StripeSubscriptionID, s.DonorID, s.ProductID, s.PriceID, string(s.Status), nz(s.CurrentPeriodEnd))
+		s.AccountID, s.StripeSubscriptionID, s.DonorID, s.ProductID, s.PriceID, string(s.Status), nz(s.CurrentPeriodEnd))
 	return err
 }
 
@@ -280,10 +304,10 @@ func (p *Postgres) UpsertSubscription(ctx context.Context, s domain.Subscription
 
 func (p *Postgres) UpsertLedgerEntry(ctx context.Context, e domain.LedgerEntry) (bool, error) {
 	tag, err := p.pool.Exec(ctx, `
-		INSERT INTO ledger_entries (stripe_balance_txn_id, tenant_id, type, amount_minor, currency, fee_minor, created_at)
+		INSERT INTO ledger_entries (stripe_balance_txn_id, account_id, type, amount_minor, currency, fee_minor, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
 		ON CONFLICT (stripe_balance_txn_id) DO NOTHING`,
-		e.StripeBalanceTxnID, e.TenantID, e.Type, e.Amount.Amount, e.Amount.Currency, e.Fee.Amount, nz(e.CreatedAt))
+		e.StripeBalanceTxnID, e.AccountID, e.Type, e.Amount.Amount, e.Amount.Currency, e.Fee.Amount, nz(e.CreatedAt))
 	if err != nil {
 		return false, err
 	}

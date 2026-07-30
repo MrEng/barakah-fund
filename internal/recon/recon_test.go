@@ -17,15 +17,15 @@ func fixedClock() func() time.Time {
 	return func() time.Time { return now }
 }
 
-func newEngine(t *testing.T) (*Engine, *mock.Mock, *store.Memory, domain.Tenant) {
+func newEngine(t *testing.T) (*Engine, *mock.Mock, *store.Memory, domain.Account) {
 	t.Helper()
 	clock := fixedClock()
 	gw := mock.New()
 	gw.SetClock(clock)
 	st := store.NewMemory()
-	tenant := domain.Tenant{ID: "t1", StripeAccountID: "acct_1", ChargesEnabled: true}
-	st.SaveTenant(context.Background(), tenant)
-	return New(gw, st, clock), gw, st, tenant
+	account := domain.Account{ID: "t1", StripeAccountID: "acct_1", ChargesEnabled: true}
+	st.SaveAccount(context.Background(), account)
+	return New(gw, st, clock), gw, st, account
 }
 
 func window() (time.Time, time.Time) {
@@ -34,13 +34,13 @@ func window() (time.Time, time.Time) {
 }
 
 func TestReconcileBackfillsMissingSucceededPayment(t *testing.T) {
-	eng, gw, st, tenant := newEngine(t)
+	eng, gw, st, account := newEngine(t)
 	ctx := context.Background()
 	// A confirmed charge exists at Stripe but was never persisted locally.
 	pi, _ := gw.CreatePaymentIntent(ctx, "acct_1", payment.CreatePaymentIntentParams{Amount: money.New(3000, "USD"), Confirm: true})
 
 	from, to := window()
-	rep, err := eng.Reconcile(ctx, tenant, from, to)
+	rep, err := eng.Reconcile(ctx, account, from, to)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,13 +57,13 @@ func TestReconcileBackfillsMissingSucceededPayment(t *testing.T) {
 }
 
 func TestReconcileBackfillsFailedPayment(t *testing.T) {
-	eng, gw, st, tenant := newEngine(t)
+	eng, gw, st, account := newEngine(t)
 	ctx := context.Background()
 	pi, _ := gw.CreatePaymentIntent(ctx, "acct_1", payment.CreatePaymentIntentParams{Amount: money.New(800, "USD")})
 	gw.Fail("acct_1", pi.ID, "declined") // no balance txn for failures
 
 	from, to := window()
-	if _, err := eng.Reconcile(ctx, tenant, from, to); err != nil {
+	if _, err := eng.Reconcile(ctx, account, from, to); err != nil {
 		t.Fatal(err)
 	}
 	got, err := st.GetPayment(ctx, "t1", pi.ID)
@@ -76,13 +76,13 @@ func TestReconcileBackfillsFailedPayment(t *testing.T) {
 }
 
 func TestReconcileIsIdempotent(t *testing.T) {
-	eng, gw, _, tenant := newEngine(t)
+	eng, gw, _, account := newEngine(t)
 	ctx := context.Background()
 	gw.CreatePaymentIntent(ctx, "acct_1", payment.CreatePaymentIntentParams{Amount: money.New(1200, "USD"), Confirm: true})
 
 	from, to := window()
-	first, _ := eng.Reconcile(ctx, tenant, from, to)
-	second, _ := eng.Reconcile(ctx, tenant, from, to)
+	first, _ := eng.Reconcile(ctx, account, from, to)
+	second, _ := eng.Reconcile(ctx, account, from, to)
 	if first.Backfilled == 0 {
 		t.Fatalf("first run should backfill, got %+v", first)
 	}
@@ -91,10 +91,10 @@ func TestReconcileIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestReconcileAllIteratesTenants(t *testing.T) {
+func TestReconcileAllIteratesAccounts(t *testing.T) {
 	eng, gw, st, _ := newEngine(t)
 	ctx := context.Background()
-	st.SaveTenant(ctx, domain.Tenant{ID: "t2", StripeAccountID: "acct_2", ChargesEnabled: true})
+	st.SaveAccount(ctx, domain.Account{ID: "t2", StripeAccountID: "acct_2", ChargesEnabled: true})
 	gw.CreatePaymentIntent(ctx, "acct_1", payment.CreatePaymentIntentParams{Amount: money.New(100, "USD"), Confirm: true})
 	gw.CreatePaymentIntent(ctx, "acct_2", payment.CreatePaymentIntentParams{Amount: money.New(200, "USD"), Confirm: true})
 

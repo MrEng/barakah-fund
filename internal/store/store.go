@@ -1,6 +1,6 @@
 // Package store defines the persistence port and an in-memory implementation.
 // The real deployment backs this with Cloud SQL (PostgreSQL); the in-memory
-// store is used by unit and integration tests. All access is tenant-scoped.
+// store is used by unit and integration tests. All access is account-scoped.
 package store
 
 import (
@@ -17,7 +17,7 @@ var ErrNotFound = errors.New("store: not found")
 
 // PaymentFilter narrows a payments query for metrics and reporting.
 type PaymentFilter struct {
-	TenantID  string
+	AccountID string
 	ProductID string // optional
 	From      time.Time
 	To        time.Time
@@ -25,19 +25,19 @@ type PaymentFilter struct {
 
 // Store is the persistence port used by services, webhooks, recon and metrics.
 type Store interface {
-	// Tenants
-	SaveTenant(ctx context.Context, t domain.Tenant) error
-	GetTenant(ctx context.Context, id string) (domain.Tenant, error)
-	ListTenants(ctx context.Context) ([]domain.Tenant, error)
+	// Accounts
+	SaveAccount(ctx context.Context, a domain.Account) error
+	GetAccount(ctx context.Context, id string) (domain.Account, error)
+	ListAccounts(ctx context.Context) ([]domain.Account, error)
 
 	// Donors
 	SaveDonor(ctx context.Context, d domain.Donor) error
-	GetDonor(ctx context.Context, tenantID, donorID string) (domain.Donor, error)
-	FindDonorByEmail(ctx context.Context, tenantID, email string) (domain.Donor, error)
+	GetDonor(ctx context.Context, accountID, donorID string) (domain.Donor, error)
+	FindDonorByEmail(ctx context.Context, accountID, email string) (domain.Donor, error)
 
 	// Payments (upsert keyed by StripePaymentIntentID)
 	UpsertPayment(ctx context.Context, p domain.Payment) error
-	GetPayment(ctx context.Context, tenantID, paymentIntentID string) (domain.Payment, error)
+	GetPayment(ctx context.Context, accountID, paymentIntentID string) (domain.Payment, error)
 	ListPayments(ctx context.Context, f PaymentFilter) ([]domain.Payment, error)
 
 	// Subscriptions (upsert keyed by StripeSubscriptionID)
@@ -57,9 +57,9 @@ type Store interface {
 // Memory is a concurrency-safe in-memory Store.
 type Memory struct {
 	mu          sync.RWMutex
-	tenants     map[string]domain.Tenant
-	donors      map[string]domain.Donor   // tenantID|donorID
-	payments    map[string]domain.Payment // tenantID|piID
+	accounts    map[string]domain.Account
+	donors      map[string]domain.Donor   // accountID|donorID
+	payments    map[string]domain.Payment // accountID|piID
 	subs        map[string]domain.Subscription
 	ledger      map[string]domain.LedgerEntry // balanceTxnID
 	events      map[string]bool
@@ -69,7 +69,7 @@ type Memory struct {
 // NewMemory builds an empty in-memory store.
 func NewMemory() *Memory {
 	return &Memory{
-		tenants:     map[string]domain.Tenant{},
+		accounts:    map[string]domain.Account{},
 		donors:      map[string]domain.Donor{},
 		payments:    map[string]domain.Payment{},
 		subs:        map[string]domain.Subscription{},
@@ -90,29 +90,29 @@ func key(parts ...string) string {
 	return s
 }
 
-func (m *Memory) SaveTenant(_ context.Context, t domain.Tenant) error {
+func (m *Memory) SaveAccount(_ context.Context, a domain.Account) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.tenants[t.ID] = t
+	m.accounts[a.ID] = a
 	return nil
 }
 
-func (m *Memory) GetTenant(_ context.Context, id string) (domain.Tenant, error) {
+func (m *Memory) GetAccount(_ context.Context, id string) (domain.Account, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	t, ok := m.tenants[id]
+	a, ok := m.accounts[id]
 	if !ok {
-		return domain.Tenant{}, ErrNotFound
+		return domain.Account{}, ErrNotFound
 	}
-	return t, nil
+	return a, nil
 }
 
-func (m *Memory) ListTenants(_ context.Context) ([]domain.Tenant, error) {
+func (m *Memory) ListAccounts(_ context.Context) ([]domain.Account, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := make([]domain.Tenant, 0, len(m.tenants))
-	for _, t := range m.tenants {
-		out = append(out, t)
+	out := make([]domain.Account, 0, len(m.accounts))
+	for _, a := range m.accounts {
+		out = append(out, a)
 	}
 	return out, nil
 }
@@ -120,25 +120,25 @@ func (m *Memory) ListTenants(_ context.Context) ([]domain.Tenant, error) {
 func (m *Memory) SaveDonor(_ context.Context, d domain.Donor) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.donors[key(d.TenantID, d.ID)] = d
+	m.donors[key(d.AccountID, d.ID)] = d
 	return nil
 }
 
-func (m *Memory) GetDonor(_ context.Context, tenantID, donorID string) (domain.Donor, error) {
+func (m *Memory) GetDonor(_ context.Context, accountID, donorID string) (domain.Donor, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	d, ok := m.donors[key(tenantID, donorID)]
+	d, ok := m.donors[key(accountID, donorID)]
 	if !ok {
 		return domain.Donor{}, ErrNotFound
 	}
 	return d, nil
 }
 
-func (m *Memory) FindDonorByEmail(_ context.Context, tenantID, email string) (domain.Donor, error) {
+func (m *Memory) FindDonorByEmail(_ context.Context, accountID, email string) (domain.Donor, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, d := range m.donors {
-		if d.TenantID == tenantID && d.Email == email {
+		if d.AccountID == accountID && d.Email == email {
 			return d, nil
 		}
 	}
@@ -148,14 +148,14 @@ func (m *Memory) FindDonorByEmail(_ context.Context, tenantID, email string) (do
 func (m *Memory) UpsertPayment(_ context.Context, p domain.Payment) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.payments[key(p.TenantID, p.StripePaymentIntentID)] = p
+	m.payments[key(p.AccountID, p.StripePaymentIntentID)] = p
 	return nil
 }
 
-func (m *Memory) GetPayment(_ context.Context, tenantID, piID string) (domain.Payment, error) {
+func (m *Memory) GetPayment(_ context.Context, accountID, piID string) (domain.Payment, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	p, ok := m.payments[key(tenantID, piID)]
+	p, ok := m.payments[key(accountID, piID)]
 	if !ok {
 		return domain.Payment{}, ErrNotFound
 	}
@@ -167,7 +167,7 @@ func (m *Memory) ListPayments(_ context.Context, f PaymentFilter) ([]domain.Paym
 	defer m.mu.RUnlock()
 	var out []domain.Payment
 	for _, p := range m.payments {
-		if p.TenantID != f.TenantID {
+		if p.AccountID != f.AccountID {
 			continue
 		}
 		if f.ProductID != "" && p.ProductID != f.ProductID {
@@ -187,7 +187,7 @@ func (m *Memory) ListPayments(_ context.Context, f PaymentFilter) ([]domain.Paym
 func (m *Memory) UpsertSubscription(_ context.Context, s domain.Subscription) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.subs[key(s.TenantID, s.StripeSubscriptionID)] = s
+	m.subs[key(s.AccountID, s.StripeSubscriptionID)] = s
 	return nil
 }
 

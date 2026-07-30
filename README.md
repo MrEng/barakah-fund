@@ -1,9 +1,11 @@
 # Barakah Fund — payment service
 
 A Go service that wraps Stripe to power a **multi-tenant donation platform**. Each
-tenant is an independent organization collecting donations through its own Stripe
-connected account. The service configures Stripe and records outcomes — it never
-processes payments itself.
+organization collects donations through its own Stripe connected account, passed
+to the API as `account_id`. Callers may also send their own `tenant_id`, which is
+not used for routing — it rides through Stripe metadata purely so it comes back
+in results and webhook notifications. The service configures Stripe and records
+outcomes — it never processes payments itself.
 
 See [DESIGN.md](DESIGN.md) for the full end-to-end design and rationale.
 
@@ -26,7 +28,7 @@ internal/email              donor-notification port (+ log + recorder impls)
 internal/app                use-case services (donations, cards, subs, links)
 internal/webhook            verified-event router (authoritative status)
 internal/recon              reconciliation engine (backstop) + fan-out helper
-internal/metrics            per-tenant / per-product dashboard aggregation
+internal/metrics            per-account / per-product dashboard aggregation
 internal/httpapi            thin HTTP handlers
 ```
 
@@ -39,7 +41,7 @@ Donor: ensure donor (Stripe customer id), add card (SetupIntent), list cards,
 remove card. Donations: start one-off custom-amount donation (returns client
 secret), refund. Recurring: create / cancel / suspend / resume subscription.
 Hosted: create donation payment link (single custom-amount or recurring).
-Ops: verify webhook signature, reconcile a tenant over a window.
+Ops: verify webhook signature, reconcile an account over a window.
 
 ## Running the tests
 
@@ -69,8 +71,8 @@ With `STRIPE_SECRET_KEY` set, the real Stripe adapter is used instead.
 | `GET /health` | liveness |
 | `POST /v1/donations` | start a custom-amount donation, returns client secret |
 | `POST /v1/webhooks/stripe` | receive + verify + apply Stripe events |
-| `GET /v1/metrics/tenants/{tenantID}/summary?from&to` | dashboard summary |
-| `POST /admin/reconcile` | reconcile `{tenant_id?, from, to}` (backstop / manual) |
+| `GET /v1/metrics/accounts/{accountID}/summary?from&to` | dashboard summary |
+| `POST /admin/reconcile` | reconcile `{account_id?, from, to}` (backstop / manual) |
 
 ## Configuration (environment)
 
@@ -79,6 +81,7 @@ With `STRIPE_SECRET_KEY` set, the real Stripe adapter is used instead.
 | `PORT` | `8080` | provided by Cloud Run |
 | `STRIPE_SECRET_KEY` | — | if set, use real Stripe; else mock |
 | `STRIPE_WEBHOOK_SECRET` | — | webhook signing secret |
+| `DEFAULT_ACCOUNT_ID` | — | Stripe account used when a request omits `account_id`; empty = platform-direct |
 | `REPORTING_CURRENCY` | `USD` | dashboard reporting currency |
 | `APPLICATION_FEE_BPS` | `0` | platform fee in basis points (100 = 1%) |
 
@@ -90,8 +93,8 @@ With `STRIPE_SECRET_KEY` set, the real Stripe adapter is used instead.
 - **Secrets**: Secret Manager (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`).
 - **Reconciliation loop**: there is no in-process timer. **Cloud Scheduler**
   (every 6h) triggers a dispatcher that publishes one **Pub/Sub** message per
-  tenant; a Cloud Run push subscription runs `recon.Engine.Reconcile` for that
-  tenant. Idempotent upserts make Pub/Sub redelivery and concurrent runs safe.
+  account; a Cloud Run push subscription runs `recon.Engine.Reconcile` for that
+  account. Idempotent upserts make Pub/Sub redelivery and concurrent runs safe.
   The `POST /admin/reconcile` endpoint reuses the same engine for manual
   from/to backfills.
 

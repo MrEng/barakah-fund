@@ -67,15 +67,15 @@ func (r *Router) Handle(ctx context.Context, e payment.Event) error {
 		if err != nil {
 			return err
 		}
-		r.metrics.RecordDonation(ctx, p.TenantID, string(domain.PaymentSucceeded))
-		r.metrics.RecordCaptured(ctx, p.TenantID, p.Amount.Currency, p.Amount.Amount)
+		r.metrics.RecordDonation(ctx, p.AccountID, string(domain.PaymentSucceeded))
+		r.metrics.RecordCaptured(ctx, p.AccountID, p.Amount.Currency, p.Amount.Amount)
 		return r.forward(ctx, e, p)
 	case payment.EventPaymentFailed:
 		p, err := r.applyPaymentStatus(ctx, e, domain.PaymentFailed)
 		if err != nil {
 			return err
 		}
-		r.metrics.RecordDonation(ctx, p.TenantID, string(domain.PaymentFailed))
+		r.metrics.RecordDonation(ctx, p.AccountID, string(domain.PaymentFailed))
 		if err := r.emailFailure(ctx, p); err != nil {
 			return err
 		}
@@ -91,9 +91,10 @@ func (r *Router) forward(ctx context.Context, e payment.Event, p domain.Payment)
 	if r.forwarder == nil {
 		return nil
 	}
-	url := ""
+	url, tenantID := "", ""
 	if e.PaymentIntent != nil {
 		url = e.PaymentIntent.Metadata["webhook_url"]
+		tenantID = e.PaymentIntent.Metadata["tenant_id"]
 	}
 	if url == "" {
 		url = r.defaultWebhookURL
@@ -101,10 +102,14 @@ func (r *Router) forward(ctx context.Context, e payment.Event, p domain.Payment)
 	if url == "" {
 		return nil // nothing to forward to
 	}
+	if tenantID == "" {
+		tenantID = p.Metadata["tenant_id"]
+	}
 	return r.forwarder.Notify(ctx, url, Notification{
 		Event:           string(e.Type),
 		PaymentIntentID: p.StripePaymentIntentID,
-		TenantID:        p.TenantID,
+		AccountID:       p.AccountID,
+		TenantID:        tenantID,
 		Status:          string(p.Status),
 		Amount:          p.Amount.Amount,
 		Currency:        p.Amount.Currency,
@@ -116,14 +121,17 @@ func (r *Router) applyPaymentStatus(ctx context.Context, e payment.Event, status
 	if pi == nil {
 		return domain.Payment{}, errors.New("webhook: missing payment intent")
 	}
-	tenantID := pi.Metadata["tenant_id"]
+	accountID := pi.Metadata["account_id"]
 	now := r.now()
-	p, err := r.store.GetPayment(ctx, tenantID, pi.ID)
+	p, err := r.store.GetPayment(ctx, accountID, pi.ID)
 	if err != nil {
 		// Backfill an unseen intent (webhook arrived before our write, or was missed).
 		p = domain.Payment{
-			TenantID: tenantID, StripePaymentIntentID: pi.ID, Amount: pi.Amount,
+			AccountID: accountID, StripePaymentIntentID: pi.ID, Amount: pi.Amount,
 			ProductID: pi.Metadata["product_id"], Source: domain.SourceWebhook, CreatedAt: now,
+		}
+		if tid := pi.Metadata["tenant_id"]; tid != "" {
+			p.Metadata = map[string]string{"tenant_id": tid}
 		}
 	}
 	p.Status = status
@@ -139,7 +147,7 @@ func (r *Router) emailFailure(ctx context.Context, p domain.Payment) error {
 	if p.DonorID == "" {
 		return nil
 	}
-	d, err := r.store.GetDonor(ctx, p.TenantID, p.DonorID)
+	d, err := r.store.GetDonor(ctx, p.AccountID, p.DonorID)
 	if err != nil {
 		return nil // donor unknown; nothing to email
 	}

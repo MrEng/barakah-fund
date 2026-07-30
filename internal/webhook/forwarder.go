@@ -15,7 +15,8 @@ import (
 type Notification struct {
 	Event           string `json:"event"`
 	PaymentIntentID string `json:"payment_intent_id"`
-	TenantID        string `json:"tenant_id"`
+	AccountID       string `json:"account_id"`
+	TenantID        string `json:"tenant_id,omitempty"` // caller's identifier, echoed from metadata
 	Status          string `json:"status"`
 	Amount          int64  `json:"amount"`
 	Currency        string `json:"currency"`

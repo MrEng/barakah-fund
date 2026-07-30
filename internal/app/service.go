@@ -38,36 +38,47 @@ func New(gw payment.Gateway, st store.Store, n email.Notifier, opt Options) *Ser
 	return &Service{gw: gw, store: st, notifier: n, now: opt.Now, feeBps: opt.ApplicationFeeBps}
 }
 
-func (s *Service) account(ctx context.Context, tenantID string) (domain.Tenant, error) {
-	t, err := s.store.GetTenant(ctx, tenantID)
-	if err != nil {
-		return domain.Tenant{}, fmt.Errorf("resolve tenant: %w", err)
-	}
-	if !t.ChargesEnabled {
-		return domain.Tenant{}, payment.NewError(payment.CodeInvalid, "tenant not chargeable")
-	}
-	return t, nil
+// account resolves the Stripe connected account for a request. There is no
+// account table lookup: the caller passes the Stripe account id directly, and
+// it is used as-is for the Stripe-Account header. An empty id means
+// platform-direct — charge on the platform account with no header. Stripe
+// itself rejects accounts that aren't connected or can't charge, so no local
+// chargeable gate is needed.
+func (s *Service) account(_ context.Context, accountID string) (domain.Account, error) {
+	return domain.Account{ID: accountID, StripeAccountID: accountID, ChargesEnabled: true}, nil
 }
 
 func (s *Service) fee(amount money.Money) money.Money {
 	return money.New(amount.Amount*s.feeBps/10000, amount.Currency)
 }
 
+// attribution builds the Stripe metadata common to charges/subscriptions/links:
+// account_id routes webhooks back to the local projection, tenant_id is the
+// caller's own identifier carried through Stripe purely so it comes back in
+// events and results.
+func attribution(accountID, tenantID string) map[string]string {
+	meta := map[string]string{"account_id": accountID}
+	if tenantID != "" {
+		meta["tenant_id"] = tenantID
+	}
+	return meta
+}
+
 // EnsureDonor returns the donor for an email, creating a Stripe customer and a
 // donor record on first sight. This is the "client with a Stripe-like id".
-func (s *Service) EnsureDonor(ctx context.Context, tenantID, emailAddr, name string) (domain.Donor, error) {
-	t, err := s.account(ctx, tenantID)
+func (s *Service) EnsureDonor(ctx context.Context, accountID, emailAddr, name string) (domain.Donor, error) {
+	t, err := s.account(ctx, accountID)
 	if err != nil {
 		return domain.Donor{}, err
 	}
-	if d, err := s.store.FindDonorByEmail(ctx, tenantID, emailAddr); err == nil {
+	if d, err := s.store.FindDonorByEmail(ctx, accountID, emailAddr); err == nil {
 		return d, nil
 	}
 	cus, err := s.gw.CreateCustomer(ctx, t.StripeAccountID, payment.CreateCustomerParams{Email: emailAddr, Name: name})
 	if err != nil {
 		return domain.Donor{}, fmt.Errorf("create customer: %w", err)
 	}
-	d := domain.Donor{ID: cus.ID, TenantID: tenantID, Email: emailAddr, Name: name, StripeCustomerID: cus.ID}
+	d := domain.Donor{ID: cus.ID, AccountID: accountID, Email: emailAddr, Name: name, StripeCustomerID: cus.ID}
 	if err := s.store.SaveDonor(ctx, d); err != nil {
 		return domain.Donor{}, err
 	}
@@ -75,12 +86,12 @@ func (s *Service) EnsureDonor(ctx context.Context, tenantID, emailAddr, name str
 }
 
 // AddCard starts the add-card flow and returns a SetupIntent secret for the client.
-func (s *Service) AddCard(ctx context.Context, tenantID, donorID string) (payment.SetupIntent, error) {
-	t, err := s.account(ctx, tenantID)
+func (s *Service) AddCard(ctx context.Context, accountID, donorID string) (payment.SetupIntent, error) {
+	t, err := s.account(ctx, accountID)
 	if err != nil {
 		return payment.SetupIntent{}, err
 	}
-	d, err := s.store.GetDonor(ctx, tenantID, donorID)
+	d, err := s.store.GetDonor(ctx, accountID, donorID)
 	if err != nil {
 		return payment.SetupIntent{}, err
 	}
@@ -88,12 +99,12 @@ func (s *Service) AddCard(ctx context.Context, tenantID, donorID string) (paymen
 }
 
 // ListCards returns the donor's saved cards.
-func (s *Service) ListCards(ctx context.Context, tenantID, donorID string) ([]payment.Card, error) {
-	t, err := s.account(ctx, tenantID)
+func (s *Service) ListCards(ctx context.Context, accountID, donorID string) ([]payment.Card, error) {
+	t, err := s.account(ctx, accountID)
 	if err != nil {
 		return nil, err
 	}
-	d, err := s.store.GetDonor(ctx, tenantID, donorID)
+	d, err := s.store.GetDonor(ctx, accountID, donorID)
 	if err != nil {
 		return nil, err
 	}
@@ -101,8 +112,8 @@ func (s *Service) ListCards(ctx context.Context, tenantID, donorID string) ([]pa
 }
 
 // RemoveCard detaches a saved card.
-func (s *Service) RemoveCard(ctx context.Context, tenantID, paymentMethodID string) error {
-	t, err := s.account(ctx, tenantID)
+func (s *Service) RemoveCard(ctx context.Context, accountID, paymentMethodID string) error {
+	t, err := s.account(ctx, accountID)
 	if err != nil {
 		return err
 	}
@@ -111,7 +122,8 @@ func (s *Service) RemoveCard(ctx context.Context, tenantID, paymentMethodID stri
 
 // StartDonationInput is the request for a one-off custom-amount donation.
 type StartDonationInput struct {
-	TenantID        string
+	AccountID       string // Stripe connected account the charge runs on
+	TenantID        string // optional caller identifier, echoed back via metadata
 	DonorID         string
 	ProductID       string
 	Amount          money.Money
@@ -126,11 +138,11 @@ func (s *Service) StartDonation(ctx context.Context, in StartDonationInput) (pay
 	if err := in.Amount.Validate(); err != nil {
 		return payment.PaymentIntent{}, payment.NewError(payment.CodeInvalid, err.Error())
 	}
-	t, err := s.account(ctx, in.TenantID)
+	t, err := s.account(ctx, in.AccountID)
 	if err != nil {
 		return payment.PaymentIntent{}, err
 	}
-	d, err := s.store.GetDonor(ctx, in.TenantID, in.DonorID)
+	d, err := s.store.GetDonor(ctx, in.AccountID, in.DonorID)
 	if err != nil {
 		return payment.PaymentIntent{}, err
 	}
@@ -139,7 +151,8 @@ func (s *Service) StartDonation(ctx context.Context, in StartDonationInput) (pay
 			return s.gw.GetPaymentIntent(ctx, t.StripeAccountID, piID)
 		}
 	}
-	meta := map[string]string{"tenant_id": in.TenantID, "product_id": in.ProductID}
+	meta := attribution(in.AccountID, in.TenantID)
+	meta["product_id"] = in.ProductID
 	if in.WebhookURL != "" {
 		meta["webhook_url"] = in.WebhookURL
 	}
@@ -156,12 +169,16 @@ func (s *Service) StartDonation(ctx context.Context, in StartDonationInput) (pay
 		return payment.PaymentIntent{}, fmt.Errorf("create payment intent: %w", err)
 	}
 	now := s.now()
+	localMeta := map[string]string{"product_id": in.ProductID}
+	if in.TenantID != "" {
+		localMeta["tenant_id"] = in.TenantID
+	}
 	if err := s.store.UpsertPayment(ctx, domain.Payment{
-		TenantID: in.TenantID, DonorID: in.DonorID, ProductID: in.ProductID,
+		AccountID: in.AccountID, DonorID: in.DonorID, ProductID: in.ProductID,
 		StripePaymentIntentID: pi.ID, Amount: in.Amount, Status: pi.Status,
 		ApplicationFee: s.fee(in.Amount), Source: domain.SourceAPI,
 		CreatedAt: now, UpdatedAt: now,
-		Metadata: map[string]string{"product_id": in.ProductID},
+		Metadata: localMeta,
 	}); err != nil {
 		return payment.PaymentIntent{}, err
 	}
@@ -173,7 +190,8 @@ func (s *Service) StartDonation(ctx context.Context, in StartDonationInput) (pay
 
 // RecurringInput is the request for a monthly custom-amount donation.
 type RecurringInput struct {
-	TenantID        string
+	AccountID       string // Stripe connected account the subscription runs on
+	TenantID        string // optional caller identifier, echoed back via metadata
 	DonorID         string
 	ProductName     string
 	ProductID       string
@@ -188,11 +206,11 @@ func (s *Service) CreateRecurringDonation(ctx context.Context, in RecurringInput
 	if err := in.Amount.Validate(); err != nil {
 		return payment.Subscription{}, payment.NewError(payment.CodeInvalid, err.Error())
 	}
-	t, err := s.account(ctx, in.TenantID)
+	t, err := s.account(ctx, in.AccountID)
 	if err != nil {
 		return payment.Subscription{}, err
 	}
-	d, err := s.store.GetDonor(ctx, in.TenantID, in.DonorID)
+	d, err := s.store.GetDonor(ctx, in.AccountID, in.DonorID)
 	if err != nil {
 		return payment.Subscription{}, err
 	}
@@ -206,7 +224,8 @@ func (s *Service) CreateRecurringDonation(ctx context.Context, in RecurringInput
 	if err != nil {
 		return payment.Subscription{}, fmt.Errorf("create price: %w", err)
 	}
-	submeta := map[string]string{"tenant_id": in.TenantID, "product_id": in.ProductID}
+	submeta := attribution(in.AccountID, in.TenantID)
+	submeta["product_id"] = in.ProductID
 	if in.WebhookURL != "" {
 		submeta["webhook_url"] = in.WebhookURL
 	}
@@ -218,7 +237,7 @@ func (s *Service) CreateRecurringDonation(ctx context.Context, in RecurringInput
 		return payment.Subscription{}, fmt.Errorf("create subscription: %w", err)
 	}
 	if err := s.store.UpsertSubscription(ctx, domain.Subscription{
-		TenantID: in.TenantID, DonorID: in.DonorID, ProductID: in.ProductID,
+		AccountID: in.AccountID, DonorID: in.DonorID, ProductID: in.ProductID,
 		StripeSubscriptionID: sub.ID, PriceID: price.ID, Status: sub.Status,
 		CurrentPeriodEnd: sub.CurrentPeriodEnd,
 	}); err != nil {
@@ -228,28 +247,28 @@ func (s *Service) CreateRecurringDonation(ctx context.Context, in RecurringInput
 }
 
 // CancelSubscription cancels a recurring donation.
-func (s *Service) CancelSubscription(ctx context.Context, tenantID, subID string, atPeriodEnd bool) (payment.Subscription, error) {
-	return s.mutateSub(ctx, tenantID, func(acct string) (payment.Subscription, error) {
+func (s *Service) CancelSubscription(ctx context.Context, accountID, subID string, atPeriodEnd bool) (payment.Subscription, error) {
+	return s.mutateSub(ctx, accountID, func(acct string) (payment.Subscription, error) {
 		return s.gw.CancelSubscription(ctx, acct, subID, atPeriodEnd)
 	})
 }
 
 // SuspendSubscription pauses collection on a recurring donation.
-func (s *Service) SuspendSubscription(ctx context.Context, tenantID, subID string) (payment.Subscription, error) {
-	return s.mutateSub(ctx, tenantID, func(acct string) (payment.Subscription, error) {
+func (s *Service) SuspendSubscription(ctx context.Context, accountID, subID string) (payment.Subscription, error) {
+	return s.mutateSub(ctx, accountID, func(acct string) (payment.Subscription, error) {
 		return s.gw.PauseSubscription(ctx, acct, subID)
 	})
 }
 
 // ResumeSubscription resumes a paused recurring donation.
-func (s *Service) ResumeSubscription(ctx context.Context, tenantID, subID string) (payment.Subscription, error) {
-	return s.mutateSub(ctx, tenantID, func(acct string) (payment.Subscription, error) {
+func (s *Service) ResumeSubscription(ctx context.Context, accountID, subID string) (payment.Subscription, error) {
+	return s.mutateSub(ctx, accountID, func(acct string) (payment.Subscription, error) {
 		return s.gw.ResumeSubscription(ctx, acct, subID)
 	})
 }
 
-func (s *Service) mutateSub(ctx context.Context, tenantID string, fn func(acct string) (payment.Subscription, error)) (payment.Subscription, error) {
-	t, err := s.account(ctx, tenantID)
+func (s *Service) mutateSub(ctx context.Context, accountID string, fn func(acct string) (payment.Subscription, error)) (payment.Subscription, error) {
+	t, err := s.account(ctx, accountID)
 	if err != nil {
 		return payment.Subscription{}, err
 	}
@@ -258,7 +277,8 @@ func (s *Service) mutateSub(ctx context.Context, tenantID string, fn func(acct s
 
 // LinkInput is the request for a hosted donation link.
 type LinkInput struct {
-	TenantID    string
+	AccountID   string // Stripe connected account the link charges on
+	TenantID    string // optional caller identifier, echoed back via metadata
 	ProductName string
 	ProductID   string      // our product/campaign id, stamped into metadata for attribution
 	CampaignID  string      // optional, stamped into metadata
@@ -276,11 +296,11 @@ type LinkInput struct {
 // CreateDonationLink builds a Stripe-hosted payment link. Single-payment links
 // use a custom-amount price (donor types the amount); recurring links use a
 // fixed monthly price set at creation time. Attribution metadata is propagated
-// onto the resulting charge/subscription so webhooks can identify tenant and
+// onto the resulting charge/subscription so webhooks can identify account and
 // product. When DonorID is set, the hosted page pre-fills the donor's email and
 // carries a client_reference_id back in events.
 func (s *Service) CreateDonationLink(ctx context.Context, in LinkInput) (payment.PaymentLink, error) {
-	t, err := s.account(ctx, in.TenantID)
+	t, err := s.account(ctx, in.AccountID)
 	if err != nil {
 		return payment.PaymentLink{}, err
 	}
@@ -314,7 +334,9 @@ func (s *Service) CreateDonationLink(ctx context.Context, in LinkInput) (payment
 	for k, v := range in.Metadata {
 		meta[k] = v
 	}
-	meta["tenant_id"] = in.TenantID
+	for k, v := range attribution(in.AccountID, in.TenantID) {
+		meta[k] = v
+	}
 	if in.ProductID != "" {
 		meta["product_id"] = in.ProductID
 	}
@@ -326,7 +348,7 @@ func (s *Service) CreateDonationLink(ctx context.Context, in LinkInput) (payment
 	}
 	params := payment.CreatePaymentLinkParams{PriceID: price.ID, Mode: mode, Metadata: meta}
 	if in.DonorID != "" {
-		if d, err := s.store.GetDonor(ctx, in.TenantID, in.DonorID); err == nil {
+		if d, err := s.store.GetDonor(ctx, in.AccountID, in.DonorID); err == nil {
 			params.PrefilledEmail = d.Email
 			params.ClientReferenceID = d.ID
 		}

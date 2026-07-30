@@ -34,7 +34,7 @@ func newServer(t *testing.T) (*Server, *store.Memory, domain.Donor) {
 	st := store.NewMemory()
 	rec := &email.Recorder{}
 	svc := app.New(gw, st, rec, app.Options{})
-	st.SaveTenant(ctx, domain.Tenant{ID: "t1", StripeAccountID: "acct_1", ChargesEnabled: true})
+	st.SaveAccount(ctx, domain.Account{ID: "t1", StripeAccountID: "acct_1", ChargesEnabled: true})
 	d, err := svc.EnsureDonor(ctx, "t1", "donor@example.com", "Aisha")
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +58,7 @@ func TestHealth(t *testing.T) {
 
 func TestStartDonationEndpoint(t *testing.T) {
 	srv, st, d := newServer(t)
-	body := fmt.Sprintf(`{"tenant_id":"t1","donor_id":%q,"product_id":"prod_1","amount":5000,"currency":"USD"}`, d.ID)
+	body := fmt.Sprintf(`{"account_id":"t1","tenant_id":"org-7","donor_id":%q,"product_id":"prod_1","amount":5000,"currency":"USD"}`, d.ID)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/donations", bytes.NewBufferString(body)))
 	if rr.Code != http.StatusCreated {
@@ -68,10 +68,15 @@ func TestStartDonationEndpoint(t *testing.T) {
 		PaymentIntentID string `json:"payment_intent_id"`
 		ClientSecret    string `json:"client_secret"`
 		Status          string `json:"status"`
+		AccountID       string `json:"account_id"`
+		TenantID        string `json:"tenant_id"`
 	}
 	json.Unmarshal(rr.Body.Bytes(), &resp)
 	if resp.ClientSecret == "" || resp.Status != string(domain.PaymentRequested) {
 		t.Fatalf("resp = %+v", resp)
+	}
+	if resp.AccountID != "t1" || resp.TenantID != "org-7" {
+		t.Fatalf("resp attribution = %+v, want account t1 / tenant org-7", resp)
 	}
 	if _, err := st.GetPayment(context.Background(), "t1", resp.PaymentIntentID); err != nil {
 		t.Fatalf("payment not stored: %v", err)
@@ -89,7 +94,7 @@ func TestCreatePaymentLinkEndpoint(t *testing.T) {
 		{"subscription", true, "subscription"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := fmt.Sprintf(`{"tenant_id":"t1","customer_id":%q,"product_name":"Zakat","amount":5000,"currency":"USD","recurring":%v}`, d.ID, tc.recurring)
+			body := fmt.Sprintf(`{"account_id":"t1","customer_id":%q,"product_name":"Zakat","amount":5000,"currency":"USD","recurring":%v}`, d.ID, tc.recurring)
 			rr := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/payment-links", bytes.NewBufferString(body)))
 			if rr.Code != http.StatusCreated {
@@ -107,7 +112,7 @@ func TestCreatePaymentLinkEndpoint(t *testing.T) {
 func TestWebhookEndpoint(t *testing.T) {
 	srv, st, d := newServer(t)
 	// Create a donation to get a real intent id.
-	body := fmt.Sprintf(`{"tenant_id":"t1","donor_id":%q,"product_id":"prod_1","amount":5000,"currency":"USD"}`, d.ID)
+	body := fmt.Sprintf(`{"account_id":"t1","donor_id":%q,"product_id":"prod_1","amount":5000,"currency":"USD"}`, d.ID)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/donations", bytes.NewBufferString(body)))
 	var created struct {
@@ -116,7 +121,7 @@ func TestWebhookEndpoint(t *testing.T) {
 	json.Unmarshal(rr.Body.Bytes(), &created)
 
 	payload := fmt.Sprintf(
-		`{"id":"evt_1","type":"payment_intent.succeeded","account":"acct_1","data":{"object":{"id":%q,"amount":5000,"currency":"usd","metadata":{"tenant_id":"t1"}}}}`,
+		`{"id":"evt_1","type":"payment_intent.succeeded","account":"acct_1","data":{"object":{"id":%q,"amount":5000,"currency":"usd","metadata":{"account_id":"t1"}}}}`,
 		created.PaymentIntentID)
 	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/stripe", bytes.NewBufferString(payload))
 	req.Header.Set("Stripe-Signature", sign(payload, webhookSecret))
@@ -147,12 +152,12 @@ func TestMetricsSummaryEndpoint(t *testing.T) {
 	srv, st, d := newServer(t)
 	ctx := context.Background()
 	// two succeeded, one failed
-	st.UpsertPayment(ctx, domain.Payment{TenantID: "t1", StripePaymentIntentID: "pi_a", DonorID: d.ID, Amount: money.New(1000, "USD"), Status: domain.PaymentSucceeded, CreatedAt: time.Now()})
-	st.UpsertPayment(ctx, domain.Payment{TenantID: "t1", StripePaymentIntentID: "pi_b", DonorID: d.ID, Amount: money.New(2000, "USD"), Status: domain.PaymentSucceeded, CreatedAt: time.Now()})
-	st.UpsertPayment(ctx, domain.Payment{TenantID: "t1", StripePaymentIntentID: "pi_c", DonorID: d.ID, Amount: money.New(500, "USD"), Status: domain.PaymentFailed, CreatedAt: time.Now()})
+	st.UpsertPayment(ctx, domain.Payment{AccountID: "t1", StripePaymentIntentID: "pi_a", DonorID: d.ID, Amount: money.New(1000, "USD"), Status: domain.PaymentSucceeded, CreatedAt: time.Now()})
+	st.UpsertPayment(ctx, domain.Payment{AccountID: "t1", StripePaymentIntentID: "pi_b", DonorID: d.ID, Amount: money.New(2000, "USD"), Status: domain.PaymentSucceeded, CreatedAt: time.Now()})
+	st.UpsertPayment(ctx, domain.Payment{AccountID: "t1", StripePaymentIntentID: "pi_c", DonorID: d.ID, Amount: money.New(500, "USD"), Status: domain.PaymentFailed, CreatedAt: time.Now()})
 
 	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/metrics/tenants/t1/summary", nil))
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/metrics/accounts/t1/summary", nil))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d", rr.Code)
 	}

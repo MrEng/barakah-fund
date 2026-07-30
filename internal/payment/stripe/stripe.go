@@ -1,8 +1,8 @@
 // Package stripe is the production implementation of payment.Gateway. It calls
 // Stripe's REST API directly over net/http (no SDK dependency), form-encoding
 // requests and mapping JSON responses to the port's DTOs. Every method is a
-// thin forwarder: build params, one call, map result. The tenant's connected
-// account is passed via the Stripe-Account header.
+// thin forwarder: build params, one call, map result. The connected account
+// is passed via the Stripe-Account header.
 package stripe
 
 import (

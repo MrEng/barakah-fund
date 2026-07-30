@@ -156,7 +156,7 @@ type CreatePaymentLinkParams struct {
 }
 
 // Gateway is the port implemented by the Stripe adapter and the mock.
-// Every method also takes the tenant's connected-account id (account).
+// Every method also takes the Stripe connected-account id (account).
 type Gateway interface {
 	// Customer
 	CreateCustomer(ctx context.Context, account string, p CreateCustomerParams) (Customer, error)

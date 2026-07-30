@@ -14,12 +14,12 @@ import (
 )
 
 type fixture struct {
-	svc    *Service
-	gw     *mock.Mock
-	store  *store.Memory
-	mail   *email.Recorder
-	tenant domain.Tenant
-	donor  domain.Donor
+	svc     *Service
+	gw      *mock.Mock
+	store   *store.Memory
+	mail    *email.Recorder
+	account domain.Account
+	donor   domain.Donor
 }
 
 func setup(t *testing.T) fixture {
@@ -30,21 +30,19 @@ func setup(t *testing.T) fixture {
 	rec := &email.Recorder{}
 	svc := New(gw, st, rec, Options{ApplicationFeeBps: 200}) // 2% fee
 
-	tenant := domain.Tenant{ID: "t1", Name: "Barakah Water", StripeAccountID: "acct_1", ChargesEnabled: true}
-	if err := st.SaveTenant(ctx, tenant); err != nil {
-		t.Fatal(err)
-	}
-	donor, err := svc.EnsureDonor(ctx, tenant.ID, "donor@example.com", "Aisha")
+	// The account id IS the Stripe account id; no account table is seeded.
+	account := domain.Account{ID: "acct_1", Name: "Barakah Water", StripeAccountID: "acct_1", ChargesEnabled: true}
+	donor, err := svc.EnsureDonor(ctx, account.ID, "donor@example.com", "Aisha")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fixture{svc: svc, gw: gw, store: st, mail: rec, tenant: tenant, donor: donor}
+	return fixture{svc: svc, gw: gw, store: st, mail: rec, account: account, donor: donor}
 }
 
 func TestEnsureDonorIsIdempotent(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
-	again, err := f.svc.EnsureDonor(ctx, f.tenant.ID, "donor@example.com", "Aisha")
+	again, err := f.svc.EnsureDonor(ctx, f.account.ID, "donor@example.com", "Aisha")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +55,7 @@ func TestStartDonationPersistsRequested(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	pi, err := f.svc.StartDonation(ctx, StartDonationInput{
-		TenantID: f.tenant.ID, DonorID: f.donor.ID, ProductID: "prod_water",
+		AccountID: f.account.ID, DonorID: f.donor.ID, ProductID: "prod_water",
 		Amount: money.New(5000, "USD"),
 	})
 	if err != nil {
@@ -66,7 +64,7 @@ func TestStartDonationPersistsRequested(t *testing.T) {
 	if pi.Status != domain.PaymentRequested || pi.ClientSecret == "" {
 		t.Fatalf("pi = %+v", pi)
 	}
-	stored, err := f.store.GetPayment(ctx, f.tenant.ID, pi.ID)
+	stored, err := f.store.GetPayment(ctx, f.account.ID, pi.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,9 +79,9 @@ func TestStartDonationPersistsRequested(t *testing.T) {
 func TestStartDonationWithSavedCardConfirms(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
-	card := f.gw.AttachCard(f.tenant.StripeAccountID, f.donor.StripeCustomerID, payment.Card{Brand: "visa", Last4: "4242"})
+	card := f.gw.AttachCard(f.account.StripeAccountID, f.donor.StripeCustomerID, payment.Card{Brand: "visa", Last4: "4242"})
 	pi, err := f.svc.StartDonation(ctx, StartDonationInput{
-		TenantID: f.tenant.ID, DonorID: f.donor.ID, ProductID: "prod_water",
+		AccountID: f.account.ID, DonorID: f.donor.ID, ProductID: "prod_water",
 		Amount: money.New(2500, "USD"), PaymentMethodID: card.ID,
 	})
 	if err != nil {
@@ -98,7 +96,7 @@ func TestStartDonationIdempotencyKey(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	in := StartDonationInput{
-		TenantID: f.tenant.ID, DonorID: f.donor.ID, ProductID: "prod_water",
+		AccountID: f.account.ID, DonorID: f.donor.ID, ProductID: "prod_water",
 		Amount: money.New(1000, "USD"), IdempotencyKey: "key-123",
 	}
 	first, _ := f.svc.StartDonation(ctx, in)
@@ -112,39 +110,29 @@ func TestStartDonationRejectsBadAmount(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	_, err := f.svc.StartDonation(ctx, StartDonationInput{
-		TenantID: f.tenant.ID, DonorID: f.donor.ID, Amount: money.New(0, "USD"),
+		AccountID: f.account.ID, DonorID: f.donor.ID, Amount: money.New(0, "USD"),
 	})
 	if err == nil {
 		t.Fatal("expected error for zero amount")
 	}
 }
 
-func TestChargesDisabledTenantRejected(t *testing.T) {
-	f := setup(t)
-	ctx := context.Background()
-	f.store.SaveTenant(ctx, domain.Tenant{ID: "t2", StripeAccountID: "acct_2", ChargesEnabled: false})
-	_, err := f.svc.StartDonation(ctx, StartDonationInput{TenantID: "t2", DonorID: "x", Amount: money.New(100, "USD")})
-	if err == nil {
-		t.Fatal("expected not-chargeable error")
-	}
-}
-
 func TestAddListRemoveCard(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
-	si, err := f.svc.AddCard(ctx, f.tenant.ID, f.donor.ID)
+	si, err := f.svc.AddCard(ctx, f.account.ID, f.donor.ID)
 	if err != nil || si.ClientSecret == "" {
 		t.Fatalf("add card setup intent = %+v err %v", si, err)
 	}
-	card := f.gw.AttachCard(f.tenant.StripeAccountID, f.donor.StripeCustomerID, payment.Card{Brand: "visa", Last4: "1111"})
-	cards, _ := f.svc.ListCards(ctx, f.tenant.ID, f.donor.ID)
+	card := f.gw.AttachCard(f.account.StripeAccountID, f.donor.StripeCustomerID, payment.Card{Brand: "visa", Last4: "1111"})
+	cards, _ := f.svc.ListCards(ctx, f.account.ID, f.donor.ID)
 	if len(cards) != 1 {
 		t.Fatalf("cards = %d, want 1", len(cards))
 	}
-	if err := f.svc.RemoveCard(ctx, f.tenant.ID, card.ID); err != nil {
+	if err := f.svc.RemoveCard(ctx, f.account.ID, card.ID); err != nil {
 		t.Fatal(err)
 	}
-	cards, _ = f.svc.ListCards(ctx, f.tenant.ID, f.donor.ID)
+	cards, _ = f.svc.ListCards(ctx, f.account.ID, f.donor.ID)
 	if len(cards) != 0 {
 		t.Fatalf("cards after remove = %d, want 0", len(cards))
 	}
@@ -153,9 +141,9 @@ func TestAddListRemoveCard(t *testing.T) {
 func TestRecurringDonationLifecycle(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
-	card := f.gw.AttachCard(f.tenant.StripeAccountID, f.donor.StripeCustomerID, payment.Card{Brand: "visa", Last4: "4242"})
+	card := f.gw.AttachCard(f.account.StripeAccountID, f.donor.StripeCustomerID, payment.Card{Brand: "visa", Last4: "4242"})
 	sub, err := f.svc.CreateRecurringDonation(ctx, RecurringInput{
-		TenantID: f.tenant.ID, DonorID: f.donor.ID, ProductName: "Monthly Water", ProductID: "prod_water",
+		AccountID: f.account.ID, DonorID: f.donor.ID, ProductName: "Monthly Water", ProductID: "prod_water",
 		Amount: money.New(1500, "USD"), PaymentMethodID: card.ID,
 	})
 	if err != nil {
@@ -164,15 +152,15 @@ func TestRecurringDonationLifecycle(t *testing.T) {
 	if sub.Status != domain.SubActive {
 		t.Fatalf("sub status = %s", sub.Status)
 	}
-	suspended, _ := f.svc.SuspendSubscription(ctx, f.tenant.ID, sub.ID)
+	suspended, _ := f.svc.SuspendSubscription(ctx, f.account.ID, sub.ID)
 	if suspended.Status != domain.SubPaused {
 		t.Fatalf("suspended = %s", suspended.Status)
 	}
-	resumed, _ := f.svc.ResumeSubscription(ctx, f.tenant.ID, sub.ID)
+	resumed, _ := f.svc.ResumeSubscription(ctx, f.account.ID, sub.ID)
 	if resumed.Status != domain.SubActive {
 		t.Fatalf("resumed = %s", resumed.Status)
 	}
-	canceled, _ := f.svc.CancelSubscription(ctx, f.tenant.ID, sub.ID, false)
+	canceled, _ := f.svc.CancelSubscription(ctx, f.account.ID, sub.ID, false)
 	if canceled.Status != domain.SubCanceled {
 		t.Fatalf("canceled = %s", canceled.Status)
 	}
@@ -182,7 +170,7 @@ func TestCreateDonationLinkSingleAndRecurring(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	single, err := f.svc.CreateDonationLink(ctx, LinkInput{
-		TenantID: f.tenant.ID, ProductName: "Zakat", ProductID: "prod_zakat",
+		AccountID: f.account.ID, TenantID: "org-77", ProductName: "Zakat", ProductID: "prod_zakat",
 		Amount: money.New(1000, "USD"), DonorID: f.donor.ID,
 	})
 	if err != nil {
@@ -191,15 +179,16 @@ func TestCreateDonationLinkSingleAndRecurring(t *testing.T) {
 	if single.Mode != "payment" || single.URL == "" || !single.Active {
 		t.Fatalf("single link = %+v", single)
 	}
-	// attribution metadata and donor prefill propagate to the gateway call
+	// attribution metadata and donor prefill propagate to the gateway call;
+	// the caller's tenant_id rides through so it comes back in events
 	lp := f.gw.LastLinkParams()
-	if lp.Metadata["tenant_id"] != f.tenant.ID || lp.Metadata["product_id"] != "prod_zakat" {
+	if lp.Metadata["account_id"] != f.account.ID || lp.Metadata["tenant_id"] != "org-77" || lp.Metadata["product_id"] != "prod_zakat" {
 		t.Fatalf("link metadata = %+v", lp.Metadata)
 	}
 
 	// caller-supplied custom parameters ride through alongside reserved keys
 	custom, err := f.svc.CreateDonationLink(ctx, LinkInput{
-		TenantID: f.tenant.ID, ProductName: "Ramadan", Amount: money.New(1000, "USD"),
+		AccountID: f.account.ID, ProductName: "Ramadan", Amount: money.New(1000, "USD"),
 		Metadata: map[string]string{"campaign": "ramadan-2026", "dedication": "in memory of X"},
 	})
 	if err != nil {
@@ -207,13 +196,13 @@ func TestCreateDonationLinkSingleAndRecurring(t *testing.T) {
 	}
 	_ = custom
 	cm := f.gw.LastLinkParams().Metadata
-	if cm["campaign"] != "ramadan-2026" || cm["dedication"] != "in memory of X" || cm["tenant_id"] != f.tenant.ID {
+	if cm["campaign"] != "ramadan-2026" || cm["dedication"] != "in memory of X" || cm["account_id"] != f.account.ID {
 		t.Fatalf("custom metadata not propagated: %+v", cm)
 	}
 	if lp.PrefilledEmail != f.donor.Email || lp.ClientReferenceID != f.donor.ID {
 		t.Fatalf("donor prefill not propagated: %+v", lp)
 	}
-	recur, err := f.svc.CreateDonationLink(ctx, LinkInput{TenantID: f.tenant.ID, ProductName: "Sadaqah", Amount: money.New(2000, "USD"), Recurring: true})
+	recur, err := f.svc.CreateDonationLink(ctx, LinkInput{AccountID: f.account.ID, ProductName: "Sadaqah", Amount: money.New(2000, "USD"), Recurring: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +216,7 @@ func TestOneTimeLinkAmountBehaviour(t *testing.T) {
 	ctx := context.Background()
 
 	// one-time WITH an amount → fixed price (not pay-what-you-want)
-	if _, err := f.svc.CreateDonationLink(ctx, LinkInput{TenantID: f.tenant.ID, ProductName: "Fixed", Amount: money.New(500, "USD")}); err != nil {
+	if _, err := f.svc.CreateDonationLink(ctx, LinkInput{AccountID: f.account.ID, ProductName: "Fixed", Amount: money.New(500, "USD")}); err != nil {
 		t.Fatal(err)
 	}
 	if p := f.gw.LastPriceParams(); p.CustomAmount || p.Amount.Amount != 500 {
@@ -235,7 +224,7 @@ func TestOneTimeLinkAmountBehaviour(t *testing.T) {
 	}
 
 	// one-time WITHOUT an amount → pay-what-you-want
-	if _, err := f.svc.CreateDonationLink(ctx, LinkInput{TenantID: f.tenant.ID, ProductName: "PWYW", Amount: money.New(0, "USD")}); err != nil {
+	if _, err := f.svc.CreateDonationLink(ctx, LinkInput{AccountID: f.account.ID, ProductName: "PWYW", Amount: money.New(0, "USD")}); err != nil {
 		t.Fatal(err)
 	}
 	if p := f.gw.LastPriceParams(); !p.CustomAmount {
@@ -243,7 +232,7 @@ func TestOneTimeLinkAmountBehaviour(t *testing.T) {
 	}
 
 	// one-time WITH amount + editable → custom price with the amount as preset
-	if _, err := f.svc.CreateDonationLink(ctx, LinkInput{TenantID: f.tenant.ID, ProductName: "Editable", Amount: money.New(700, "USD"), AmountEditable: true}); err != nil {
+	if _, err := f.svc.CreateDonationLink(ctx, LinkInput{AccountID: f.account.ID, ProductName: "Editable", Amount: money.New(700, "USD"), AmountEditable: true}); err != nil {
 		t.Fatal(err)
 	}
 	if p := f.gw.LastPriceParams(); !p.CustomAmount || p.Amount.Amount != 700 {
@@ -257,10 +246,9 @@ func TestServiceUsesInjectedClock(t *testing.T) {
 	st := store.NewMemory()
 	fixed := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	svc := New(gw, st, &email.Recorder{}, Options{Now: func() time.Time { return fixed }})
-	st.SaveTenant(ctx, domain.Tenant{ID: "t1", StripeAccountID: "acct_1", ChargesEnabled: true})
-	d, _ := svc.EnsureDonor(ctx, "t1", "x@y.z", "X")
-	pi, _ := svc.StartDonation(ctx, StartDonationInput{TenantID: "t1", DonorID: d.ID, Amount: money.New(100, "USD")})
-	stored, _ := st.GetPayment(ctx, "t1", pi.ID)
+	d, _ := svc.EnsureDonor(ctx, "acct_1", "x@y.z", "X")
+	pi, _ := svc.StartDonation(ctx, StartDonationInput{AccountID: "acct_1", DonorID: d.ID, Amount: money.New(100, "USD")})
+	stored, _ := st.GetPayment(ctx, "acct_1", pi.ID)
 	if !stored.CreatedAt.Equal(fixed) {
 		t.Fatalf("created at = %v, want %v", stored.CreatedAt, fixed)
 	}

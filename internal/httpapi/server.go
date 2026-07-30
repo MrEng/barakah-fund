@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/barakahfund/payments/internal/app"
+	"github.com/barakahfund/payments/internal/domain"
 	"github.com/barakahfund/payments/internal/metrics"
 	"github.com/barakahfund/payments/internal/money"
 	"github.com/barakahfund/payments/internal/payment"
@@ -23,22 +24,22 @@ import (
 
 // Deps are the collaborators an HTTP server needs.
 type Deps struct {
-	Service         *app.Service
-	Router          *webhook.Router
-	Engine          *recon.Engine
-	Gateway         payment.Gateway
-	Store           store.Store
-	WebhookSecret   string
-	Currency        string // reporting currency for the metrics dashboard
-	DefaultTenantID string // used when a request omits tenant_id
-	Metrics         *telemetry.Metrics
-	Logger          *slog.Logger
+	Service          *app.Service
+	Router           *webhook.Router
+	Engine           *recon.Engine
+	Gateway          payment.Gateway
+	Store            store.Store
+	WebhookSecret    string
+	Currency         string // reporting currency for the metrics dashboard
+	DefaultAccountID string // used when a request omits account_id
+	Metrics          *telemetry.Metrics
+	Logger           *slog.Logger
 }
 
-// tenantOr returns the request tenant id, or the configured default when empty.
-func (s *Server) tenantOr(id string) string {
+// accountOr returns the request account id, or the configured default when empty.
+func (s *Server) accountOr(id string) string {
 	if id == "" {
-		return s.deps.DefaultTenantID
+		return s.deps.DefaultAccountID
 	}
 	return id
 }
@@ -63,7 +64,7 @@ func NewServer(d Deps) *Server {
 	s.mux.HandleFunc("POST /v1/donations", s.startDonation)
 	s.mux.HandleFunc("POST /v1/payment-links", s.createPaymentLink)
 	s.mux.HandleFunc("POST /v1/webhooks/stripe", s.webhook)
-	s.mux.HandleFunc("GET /v1/metrics/tenants/{tenantID}/summary", s.tenantSummary)
+	s.mux.HandleFunc("GET /v1/metrics/accounts/{accountID}/summary", s.accountSummary)
 	s.mux.HandleFunc("POST /admin/reconcile", s.reconcile)
 	return s
 }
@@ -76,7 +77,8 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 type startDonationReq struct {
-	TenantID        string `json:"tenant_id"`
+	AccountID       string `json:"account_id"` // Stripe connected account (falls back to the default)
+	TenantID        string `json:"tenant_id"`  // optional caller identifier, echoed back via metadata
 	DonorID         string `json:"donor_id"`
 	ProductID       string `json:"product_id"`
 	Amount          int64  `json:"amount"`
@@ -92,8 +94,9 @@ func (s *Server) startDonation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	accountID := s.accountOr(req.AccountID)
 	pi, err := s.deps.Service.StartDonation(r.Context(), app.StartDonationInput{
-		TenantID: s.tenantOr(req.TenantID), DonorID: req.DonorID, ProductID: req.ProductID,
+		AccountID: accountID, TenantID: req.TenantID, DonorID: req.DonorID, ProductID: req.ProductID,
 		Amount: money.New(req.Amount, req.Currency), PaymentMethodID: req.PaymentMethodID,
 		IdempotencyKey: req.IdempotencyKey, WebhookURL: req.WebhookURL,
 	})
@@ -101,15 +104,21 @@ func (s *Server) startDonation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusForError(err), err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
+	resp := map[string]any{
 		"payment_intent_id": pi.ID,
 		"client_secret":     pi.ClientSecret,
 		"status":            pi.Status,
-	})
+		"account_id":        accountID,
+	}
+	if req.TenantID != "" {
+		resp["tenant_id"] = req.TenantID
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 type createLinkReq struct {
-	TenantID       string            `json:"tenant_id"`
+	AccountID      string            `json:"account_id"` // Stripe connected account (falls back to the default)
+	TenantID       string            `json:"tenant_id"`  // optional caller identifier, echoed back via metadata
 	ProductName    string            `json:"product_name"`
 	ProductID      string            `json:"product_id"`
 	CustomerID     string            `json:"customer_id"` // donor id; optional, used to pre-fill the hosted page
@@ -131,9 +140,9 @@ func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
 	if cur == "" {
 		cur = s.deps.Currency
 	}
-	tenantID := s.tenantOr(req.TenantID)
+	accountID := s.accountOr(req.AccountID)
 	link, err := s.deps.Service.CreateDonationLink(r.Context(), app.LinkInput{
-		TenantID: tenantID, ProductName: req.ProductName, ProductID: req.ProductID,
+		AccountID: accountID, TenantID: req.TenantID, ProductName: req.ProductName, ProductID: req.ProductID,
 		Amount: money.New(req.Amount, cur), Recurring: req.Recurring, DonorID: req.CustomerID,
 		WebhookURL: req.WebhookURL, Metadata: req.Metadata, AmountEditable: req.EditableAmount,
 	})
@@ -141,12 +150,17 @@ func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusForError(err), err)
 		return
 	}
-	s.deps.Metrics.RecordPaymentLink(r.Context(), tenantID, link.Mode)
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":   link.ID,
-		"url":  link.URL,
-		"mode": link.Mode,
-	})
+	s.deps.Metrics.RecordPaymentLink(r.Context(), accountID, link.Mode)
+	resp := map[string]any{
+		"id":         link.ID,
+		"url":        link.URL,
+		"mode":       link.Mode,
+		"account_id": accountID,
+	}
+	if req.TenantID != "" {
+		resp["tenant_id"] = req.TenantID
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
@@ -168,12 +182,12 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"received": "true"})
 }
 
-func (s *Server) tenantSummary(w http.ResponseWriter, r *http.Request) {
-	tenantID := r.PathValue("tenantID")
+func (s *Server) accountSummary(w http.ResponseWriter, r *http.Request) {
+	accountID := r.PathValue("accountID")
 	from := parseTime(r.URL.Query().Get("from"))
 	to := parseTime(r.URL.Query().Get("to"))
 	agg := metrics.New(s.deps.Store, s.deps.Currency)
-	sum, err := agg.TenantSummary(r.Context(), store.PaymentFilter{TenantID: tenantID, From: from, To: to})
+	sum, err := agg.AccountSummary(r.Context(), store.PaymentFilter{AccountID: accountID, From: from, To: to})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -182,9 +196,9 @@ func (s *Server) tenantSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 type reconcileReq struct {
-	TenantID string `json:"tenant_id"`
-	From     string `json:"from"`
-	To       string `json:"to"`
+	AccountID string `json:"account_id"`
+	From      string `json:"from"`
+	To        string `json:"to"`
 }
 
 func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
@@ -201,7 +215,7 @@ func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
 		from = to.Add(-24 * time.Hour)
 	}
 	ctx := r.Context()
-	if req.TenantID == "" {
+	if req.AccountID == "" {
 		reports, err := s.deps.Engine.ReconcileAll(ctx, from, to)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -210,12 +224,9 @@ func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"reports": reports})
 		return
 	}
-	tenant, err := s.deps.Store.GetTenant(ctx, req.TenantID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	rep, err := s.deps.Engine.Reconcile(ctx, tenant, from, to)
+	// The account id is passed directly; no account table lookup.
+	account := domain.Account{ID: req.AccountID, StripeAccountID: req.AccountID, ChargesEnabled: true}
+	rep, err := s.deps.Engine.Reconcile(ctx, account, from, to)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

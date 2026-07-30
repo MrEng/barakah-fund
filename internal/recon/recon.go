@@ -16,14 +16,14 @@ import (
 
 // Report summarises one reconciliation pass.
 type Report struct {
-	TenantID   string
+	AccountID  string
 	Scanned    int
 	Backfilled int
 	Updated    int
 	Flagged    int
 }
 
-// Engine reconciles a tenant over a time window.
+// Engine reconciles a connected account over a time window.
 type Engine struct {
 	gw      payment.Gateway
 	store   store.Store
@@ -51,8 +51,8 @@ func New(gw payment.Gateway, st store.Store, now func() time.Time, opts ...Optio
 
 // Reconcile pulls Stripe's authoritative data for [from,to] and converges the
 // local projection. Idempotent: safe to run concurrently or repeatedly.
-func (e *Engine) Reconcile(ctx context.Context, t domain.Tenant, from, to time.Time) (Report, error) {
-	rep := Report{TenantID: t.ID}
+func (e *Engine) Reconcile(ctx context.Context, t domain.Account, from, to time.Time) (Report, error) {
+	rep := Report{AccountID: t.ID}
 
 	// 1. Balance transactions are Stripe's money truth.
 	txns, err := e.gw.ListBalanceTransactions(ctx, t.StripeAccountID, from, to)
@@ -62,7 +62,7 @@ func (e *Engine) Reconcile(ctx context.Context, t domain.Tenant, from, to time.T
 	for _, tx := range txns {
 		rep.Scanned++
 		inserted, err := e.store.UpsertLedgerEntry(ctx, domain.LedgerEntry{
-			TenantID: t.ID, StripeBalanceTxnID: tx.ID, Type: tx.Type,
+			AccountID: t.ID, StripeBalanceTxnID: tx.ID, Type: tx.Type,
 			Amount: tx.Amount, Fee: tx.Fee, CreatedAt: tx.Created,
 		})
 		if err != nil {
@@ -116,10 +116,10 @@ func (e *Engine) Reconcile(ctx context.Context, t domain.Tenant, from, to time.T
 
 // ensureSucceededPayment guarantees a succeeded payment row exists for a charge.
 // Returns true if a missing row was backfilled.
-func (e *Engine) ensureSucceededPayment(ctx context.Context, tenantID string, tx payment.BalanceTxn) (bool, error) {
-	p, err := e.store.GetPayment(ctx, tenantID, tx.SourceID)
+func (e *Engine) ensureSucceededPayment(ctx context.Context, accountID string, tx payment.BalanceTxn) (bool, error) {
+	p, err := e.store.GetPayment(ctx, accountID, tx.SourceID)
 	if err != nil {
-		return true, e.backfillPayment(ctx, tenantID, tx.SourceID, tx.Amount, domain.PaymentSucceeded, "", tx.Created)
+		return true, e.backfillPayment(ctx, accountID, tx.SourceID, tx.Amount, domain.PaymentSucceeded, "", tx.Created)
 	}
 	if p.Status != domain.PaymentSucceeded {
 		p.Status = domain.PaymentSucceeded
@@ -129,23 +129,23 @@ func (e *Engine) ensureSucceededPayment(ctx context.Context, tenantID string, tx
 	return false, nil
 }
 
-func (e *Engine) backfillPayment(ctx context.Context, tenantID, piID string, amount money.Money, status domain.PaymentStatus, reason string, created time.Time) error {
+func (e *Engine) backfillPayment(ctx context.Context, accountID, piID string, amount money.Money, status domain.PaymentStatus, reason string, created time.Time) error {
 	return e.store.UpsertPayment(ctx, domain.Payment{
-		TenantID: tenantID, StripePaymentIntentID: piID, Amount: amount, Status: status,
+		AccountID: accountID, StripePaymentIntentID: piID, Amount: amount, Status: status,
 		Source: domain.SourceReconciliation, FailureReason: reason,
 		CreatedAt: created, UpdatedAt: e.now(),
 	})
 }
 
-// ReconcileAll fans out over every tenant. In production this is one Pub/Sub
-// message per tenant; this in-process helper is used by the scheduler and tests.
+// ReconcileAll fans out over every account. In production this is one Pub/Sub
+// message per account; this in-process helper is used by the scheduler and tests.
 func (e *Engine) ReconcileAll(ctx context.Context, from, to time.Time) ([]Report, error) {
-	tenants, err := e.store.ListTenants(ctx)
+	accounts, err := e.store.ListAccounts(ctx)
 	if err != nil {
 		return nil, err
 	}
-	reports := make([]Report, 0, len(tenants))
-	for _, t := range tenants {
+	reports := make([]Report, 0, len(accounts))
+	for _, t := range accounts {
 		r, err := e.Reconcile(ctx, t, from, to)
 		if err != nil {
 			return reports, err

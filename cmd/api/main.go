@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/barakahfund/payments/internal/app"
-	"github.com/barakahfund/payments/internal/domain"
 	"github.com/barakahfund/payments/internal/email"
 	"github.com/barakahfund/payments/internal/httpapi"
 	"github.com/barakahfund/payments/internal/payment"
@@ -52,15 +51,13 @@ func main() {
 
 	notifier := email.LogNotifier{Logger: logger}
 
-	// Seed a default tenant that charges on the platform (your) Stripe account
-	// directly: an empty StripeAccountID means no Stripe-Account header, i.e. no
-	// Connect. This lets you use your own test account without configuring a
-	// tenant — API calls that omit tenant_id fall back to this one.
-	defaultTenantID := envStr("DEFAULT_TENANT_ID", "default")
-	_ = st.SaveTenant(context.Background(), domain.Tenant{
-		ID: defaultTenantID, Name: "Platform (direct)", StripeAccountID: "", ChargesEnabled: true,
-	})
-	logger.Info("seeded default tenant", "tenant_id", defaultTenantID, "mode", "platform-direct")
+	// Callers pass the Stripe connected-account id directly as account_id; there
+	// is no account table to look up. When a request omits account_id it falls
+	// back to DEFAULT_ACCOUNT_ID (legacy: DEFAULT_TENANT_ID), which defaults to
+	// empty — meaning platform-direct: no Stripe-Account header, charge on the
+	// platform (your) account.
+	defaultAccountID := envStr("DEFAULT_ACCOUNT_ID", envStr("DEFAULT_TENANT_ID", ""))
+	logger.Info("account resolution: account id passed directly", "default_account_id", defaultAccountID)
 
 	// Telemetry: export metrics to Cloud Monitoring (no-op if it can't initialise,
 	// e.g. running locally without credentials).
@@ -83,11 +80,11 @@ func main() {
 
 	srv := httpapi.NewServer(httpapi.Deps{
 		Service: svc, Router: router, Engine: engine, Gateway: gw, Store: st,
-		WebhookSecret:   os.Getenv("STRIPE_WEBHOOK_SECRET"),
-		Currency:        envStr("REPORTING_CURRENCY", "USD"),
-		DefaultTenantID: defaultTenantID,
-		Metrics:         tel,
-		Logger:          logger,
+		WebhookSecret:    os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		Currency:         envStr("REPORTING_CURRENCY", "USD"),
+		DefaultAccountID: defaultAccountID,
+		Metrics:          tel,
+		Logger:           logger,
 	})
 
 	addr := ":" + envStr("PORT", "8080") // Cloud Run provides $PORT
@@ -119,7 +116,7 @@ func main() {
 	logger.Info("stopped")
 }
 
-// runReconLoop runs reconciliation across all tenants on an interval until ctx
+// runReconLoop runs reconciliation across all accounts on an interval until ctx
 // is cancelled. It does an immediate pass on startup, then ticks.
 func runReconLoop(ctx context.Context, engine *recon.Engine, interval time.Duration, logger *slog.Logger) {
 	if interval <= 0 {
@@ -142,7 +139,7 @@ func runReconLoop(ctx context.Context, engine *recon.Engine, interval time.Durat
 		for _, r := range reports {
 			backfilled += r.Backfilled
 		}
-		logger.Info("reconciliation completed", "tenants", len(reports), "backfilled", backfilled)
+		logger.Info("reconciliation completed", "accounts", len(reports), "backfilled", backfilled)
 	}
 
 	reconcile() // initial pass on startup

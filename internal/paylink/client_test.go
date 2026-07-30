@@ -33,7 +33,7 @@ func TestOneTimePaymentLink(t *testing.T) {
 	defer srv.Close()
 
 	url, err := New(srv.URL).OneTimePaymentLink(context.Background(), Request{
-		TenantID: "demo-tenant", CustomerID: "cus_123", ProductName: "Zakat", AmountMinor: 5000, Currency: "USD",
+		AccountID: "acct_demo", TenantID: "demo-tenant", CustomerID: "cus_123", ProductName: "Zakat", AmountMinor: 5000, Currency: "USD",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -44,6 +44,9 @@ func TestOneTimePaymentLink(t *testing.T) {
 	if seen["recurring"] != false || seen["customer_id"] != "cus_123" {
 		t.Fatalf("request body = %v", seen)
 	}
+	if seen["account_id"] != "acct_demo" || seen["tenant_id"] != "demo-tenant" {
+		t.Fatalf("request attribution = %v, want account acct_demo / tenant demo-tenant", seen)
+	}
 }
 
 func TestSubscriptionPaymentLink(t *testing.T) {
@@ -52,7 +55,7 @@ func TestSubscriptionPaymentLink(t *testing.T) {
 	defer srv.Close()
 
 	url, err := New(srv.URL).SubscriptionPaymentLink(context.Background(), Request{
-		TenantID: "demo-tenant", CustomerID: "cus_123", ProductName: "Monthly Sadaqah", AmountMinor: 2000, Currency: "USD",
+		AccountID: "acct_demo", CustomerID: "cus_123", ProductName: "Monthly Sadaqah", AmountMinor: 2000, Currency: "USD",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +79,7 @@ func TestLiveDeployedService(t *testing.T) {
 	}
 	c := New(base)
 	ctx := context.Background()
-	// Empty TenantID → the server uses the default platform tenant (your Stripe account).
+	// Empty AccountID → the server charges platform-direct (your Stripe account).
 
 	// One-time with an editable preset: $50 is pre-filled but the donor can change it.
 	oneTime, err := c.OneTimePaymentLink(ctx, Request{

@@ -12,7 +12,7 @@ import (
 func TestPaymentUpsertAndGet(t *testing.T) {
 	ctx := context.Background()
 	m := NewMemory()
-	p := domain.Payment{TenantID: "t1", StripePaymentIntentID: "pi_1", Amount: money.New(100, "USD"), Status: domain.PaymentRequested}
+	p := domain.Payment{AccountID: "t1", StripePaymentIntentID: "pi_1", Amount: money.New(100, "USD"), Status: domain.PaymentRequested}
 	if err := m.UpsertPayment(ctx, p); err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestPaymentUpsertAndGet(t *testing.T) {
 func TestLedgerIdempotent(t *testing.T) {
 	ctx := context.Background()
 	m := NewMemory()
-	e := domain.LedgerEntry{TenantID: "t1", StripeBalanceTxnID: "txn_1", Amount: money.New(100, "USD")}
+	e := domain.LedgerEntry{AccountID: "t1", StripeBalanceTxnID: "txn_1", Amount: money.New(100, "USD")}
 	ins, _ := m.UpsertLedgerEntry(ctx, e)
 	if !ins {
 		t.Fatal("first insert should be new")
@@ -63,19 +63,19 @@ func TestListPaymentsFilter(t *testing.T) {
 	ctx := context.Background()
 	m := NewMemory()
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	m.UpsertPayment(ctx, domain.Payment{TenantID: "t1", StripePaymentIntentID: "pi_a", ProductID: "prod_1", Amount: money.New(100, "USD"), CreatedAt: base})
-	m.UpsertPayment(ctx, domain.Payment{TenantID: "t1", StripePaymentIntentID: "pi_b", ProductID: "prod_2", Amount: money.New(200, "USD"), CreatedAt: base.Add(48 * time.Hour)})
-	m.UpsertPayment(ctx, domain.Payment{TenantID: "t2", StripePaymentIntentID: "pi_c", ProductID: "prod_1", Amount: money.New(300, "USD"), CreatedAt: base})
+	m.UpsertPayment(ctx, domain.Payment{AccountID: "t1", StripePaymentIntentID: "pi_a", ProductID: "prod_1", Amount: money.New(100, "USD"), CreatedAt: base})
+	m.UpsertPayment(ctx, domain.Payment{AccountID: "t1", StripePaymentIntentID: "pi_b", ProductID: "prod_2", Amount: money.New(200, "USD"), CreatedAt: base.Add(48 * time.Hour)})
+	m.UpsertPayment(ctx, domain.Payment{AccountID: "t2", StripePaymentIntentID: "pi_c", ProductID: "prod_1", Amount: money.New(300, "USD"), CreatedAt: base})
 
-	all, _ := m.ListPayments(ctx, PaymentFilter{TenantID: "t1"})
+	all, _ := m.ListPayments(ctx, PaymentFilter{AccountID: "t1"})
 	if len(all) != 2 {
 		t.Fatalf("t1 payments = %d, want 2", len(all))
 	}
-	byProduct, _ := m.ListPayments(ctx, PaymentFilter{TenantID: "t1", ProductID: "prod_1"})
+	byProduct, _ := m.ListPayments(ctx, PaymentFilter{AccountID: "t1", ProductID: "prod_1"})
 	if len(byProduct) != 1 {
 		t.Fatalf("t1 prod_1 = %d, want 1", len(byProduct))
 	}
-	windowed, _ := m.ListPayments(ctx, PaymentFilter{TenantID: "t1", From: base.Add(-time.Hour), To: base.Add(time.Hour)})
+	windowed, _ := m.ListPayments(ctx, PaymentFilter{AccountID: "t1", From: base.Add(-time.Hour), To: base.Add(time.Hour)})
 	if len(windowed) != 1 {
 		t.Fatalf("windowed = %d, want 1", len(windowed))
 	}
@@ -84,7 +84,7 @@ func TestListPaymentsFilter(t *testing.T) {
 func TestFindDonorByEmail(t *testing.T) {
 	ctx := context.Background()
 	m := NewMemory()
-	m.SaveDonor(ctx, domain.Donor{ID: "cus_1", TenantID: "t1", Email: "d@e.f"})
+	m.SaveDonor(ctx, domain.Donor{ID: "cus_1", AccountID: "t1", Email: "d@e.f"})
 	d, err := m.FindDonorByEmail(ctx, "t1", "d@e.f")
 	if err != nil || d.ID != "cus_1" {
 		t.Fatalf("find donor = %+v err %v", d, err)

@@ -26,7 +26,8 @@ func New(baseURL string) *Client {
 
 // Request is the input for a payment link.
 type Request struct {
-	TenantID       string            // which tenant/connected account
+	AccountID      string            // Stripe connected account the link charges on
+	TenantID       string            // optional caller identifier, echoed back via metadata
 	CustomerID     string            // donor / customer id (pre-fills the hosted page)
 	ProductName    string            // campaign/product name
 	ProductID      string            // optional, for attribution metadata
@@ -49,6 +50,7 @@ func (c *Client) SubscriptionPaymentLink(ctx context.Context, req Request) (stri
 
 func (c *Client) create(ctx context.Context, req Request, recurring bool) (string, error) {
 	body, _ := json.Marshal(map[string]any{
+		"account_id":      req.AccountID,
 		"tenant_id":       req.TenantID,
 		"customer_id":     req.CustomerID,
 		"product_name":    req.ProductName,

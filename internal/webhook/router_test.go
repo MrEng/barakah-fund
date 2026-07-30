@@ -29,8 +29,8 @@ func newHarness(t *testing.T) harness {
 	st := store.NewMemory()
 	rec := &email.Recorder{}
 	svc := app.New(gw, st, rec, app.Options{})
-	st.SaveTenant(ctx, domain.Tenant{ID: "t1", StripeAccountID: "acct_1", ChargesEnabled: true})
-	d, err := svc.EnsureDonor(ctx, "t1", "donor@example.com", "Aisha")
+	st.SaveAccount(ctx, domain.Account{ID: "acct_1", StripeAccountID: "acct_1", ChargesEnabled: true})
+	d, err := svc.EnsureDonor(ctx, "acct_1", "donor@example.com", "Aisha")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func newHarness(t *testing.T) harness {
 func (h harness) start(t *testing.T) payment.PaymentIntent {
 	t.Helper()
 	pi, err := h.svc.StartDonation(context.Background(), app.StartDonationInput{
-		TenantID: "t1", DonorID: h.donor.ID, ProductID: "prod_1", Amount: money.New(4000, "USD"),
+		AccountID: "acct_1", DonorID: h.donor.ID, ProductID: "prod_1", Amount: money.New(4000, "USD"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestWebhookMarksSucceeded(t *testing.T) {
 	if err := h.router.Handle(ctx, h.gw.Succeed("acct_1", pi.ID)); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := h.store.GetPayment(ctx, "t1", pi.ID)
+	got, _ := h.store.GetPayment(ctx, "acct_1", pi.ID)
 	if got.Status != domain.PaymentSucceeded {
 		t.Fatalf("status = %s, want succeeded", got.Status)
 	}
@@ -68,7 +68,7 @@ func TestWebhookFailureSendsEmail(t *testing.T) {
 	if err := h.router.Handle(ctx, h.gw.Fail("acct_1", pi.ID, "card_declined")); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := h.store.GetPayment(ctx, "t1", pi.ID)
+	got, _ := h.store.GetPayment(ctx, "acct_1", pi.ID)
 	if got.Status != domain.PaymentFailed || got.FailureReason != "card_declined" {
 		t.Fatalf("payment = %+v", got)
 	}
@@ -96,7 +96,7 @@ func TestForwardsToPerRequestWebhookURL(t *testing.T) {
 	router := New(h.store, h.mail, nil, WithForwarder(fwd), WithDefaultWebhookURL("https://default.example/hook"))
 
 	pi, err := h.svc.StartDonation(ctx, app.StartDonationInput{
-		TenantID: "t1", DonorID: h.donor.ID, ProductID: "prod_1", Amount: money.New(4000, "USD"),
+		AccountID: "acct_1", TenantID: "org-9", DonorID: h.donor.ID, ProductID: "prod_1", Amount: money.New(4000, "USD"),
 		WebhookURL: "https://caller.example/notify",
 	})
 	if err != nil {
@@ -114,6 +114,9 @@ func TestForwardsToPerRequestWebhookURL(t *testing.T) {
 	}
 	if c.Notification.Status != string(domain.PaymentSucceeded) || c.Notification.PaymentIntentID != pi.ID {
 		t.Fatalf("notification = %+v", c.Notification)
+	}
+	if c.Notification.AccountID != "acct_1" || c.Notification.TenantID != "org-9" {
+		t.Fatalf("notification attribution = %+v, want account acct_1 / tenant org-9", c.Notification)
 	}
 }
 
@@ -147,15 +150,15 @@ func TestWebhookBackfillsUnseenIntent(t *testing.T) {
 	ctx := context.Background()
 	// Intent created directly at the gateway (as if our write was missed).
 	pi, _ := h.gw.CreatePaymentIntent(ctx, "acct_1", payment.CreatePaymentIntentParams{
-		Amount: money.New(700, "USD"), Metadata: map[string]string{"tenant_id": "t1", "product_id": "prod_9"},
+		Amount: money.New(700, "USD"), Metadata: map[string]string{"account_id": "acct_1", "product_id": "prod_9"},
 	})
-	if _, err := h.store.GetPayment(ctx, "t1", pi.ID); err == nil {
+	if _, err := h.store.GetPayment(ctx, "acct_1", pi.ID); err == nil {
 		t.Fatal("payment should not exist yet")
 	}
 	if err := h.router.Handle(ctx, h.gw.Succeed("acct_1", pi.ID)); err != nil {
 		t.Fatal(err)
 	}
-	got, err := h.store.GetPayment(ctx, "t1", pi.ID)
+	got, err := h.store.GetPayment(ctx, "acct_1", pi.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

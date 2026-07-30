@@ -81,39 +81,39 @@ func newInstruments(m metric.Meter) (*Metrics, error) {
 	return &Metrics{linksCreated, donations, amountCaptured, backfills, events}, nil
 }
 
-// RecordPaymentLink counts a created link, tagged by tenant and mode.
-func (t *Metrics) RecordPaymentLink(ctx context.Context, tenant, mode string) {
+// RecordPaymentLink counts a created link, tagged by account and mode.
+func (t *Metrics) RecordPaymentLink(ctx context.Context, account, mode string) {
 	if t == nil || t.linksCreated == nil {
 		return
 	}
 	t.linksCreated.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("tenant", tenant), attribute.String("mode", mode)))
+		attribute.String("account", account), attribute.String("mode", mode)))
 }
 
 // RecordDonation counts a donation reaching a terminal status.
-func (t *Metrics) RecordDonation(ctx context.Context, tenant, status string) {
+func (t *Metrics) RecordDonation(ctx context.Context, account, status string) {
 	if t == nil || t.donations == nil {
 		return
 	}
 	t.donations.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("tenant", tenant), attribute.String("status", status)))
+		attribute.String("account", account), attribute.String("status", status)))
 }
 
-// RecordCaptured adds captured amount (minor units) for a tenant/currency.
-func (t *Metrics) RecordCaptured(ctx context.Context, tenant, currency string, minor int64) {
+// RecordCaptured adds captured amount (minor units) for an account/currency.
+func (t *Metrics) RecordCaptured(ctx context.Context, account, currency string, minor int64) {
 	if t == nil || t.amountCaptured == nil || minor <= 0 {
 		return
 	}
 	t.amountCaptured.Add(ctx, minor, metric.WithAttributes(
-		attribute.String("tenant", tenant), attribute.String("currency", currency)))
+		attribute.String("account", account), attribute.String("currency", currency)))
 }
 
-// RecordBackfill counts a reconciliation backfill for a tenant.
-func (t *Metrics) RecordBackfill(ctx context.Context, tenant string, n int) {
+// RecordBackfill counts a reconciliation backfill for an account.
+func (t *Metrics) RecordBackfill(ctx context.Context, account string, n int) {
 	if t == nil || t.backfills == nil || n <= 0 {
 		return
 	}
-	t.backfills.Add(ctx, int64(n), metric.WithAttributes(attribute.String("tenant", tenant)))
+	t.backfills.Add(ctx, int64(n), metric.WithAttributes(attribute.String("account", account)))
 }
 
 // RecordEvent counts a handled webhook event by type.
