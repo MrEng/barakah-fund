@@ -58,18 +58,20 @@ func TestHealth(t *testing.T) {
 
 func TestStartDonationEndpoint(t *testing.T) {
 	srv, st, d := newServer(t)
-	body := fmt.Sprintf(`{"account_id":"t1","tenant_id":"org-7","donor_id":%q,"product_id":"prod_1","amount":5000,"currency":"USD"}`, d.ID)
+	body := fmt.Sprintf(`{"account_id":"t1","tenant_id":"org-7","donor_id":%q,"product_id":"prod_1","amount":5000,"currency":"USD",
+		"metadata":{"type":"donation","item_type":"program","item_id":42,"selection":{"project_id":7,"plan_id":3},"frequency":"once","reference":"ref-uuid-1","mode":"test"}}`, d.ID)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/donations", bytes.NewBufferString(body)))
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
 	}
 	var resp struct {
-		PaymentIntentID string `json:"payment_intent_id"`
-		ClientSecret    string `json:"client_secret"`
-		Status          string `json:"status"`
-		AccountID       string `json:"account_id"`
-		TenantID        string `json:"tenant_id"`
+		PaymentIntentID string            `json:"payment_intent_id"`
+		ClientSecret    string            `json:"client_secret"`
+		Status          string            `json:"status"`
+		AccountID       string            `json:"account_id"`
+		TenantID        string            `json:"tenant_id"`
+		Metadata        map[string]string `json:"metadata"`
 	}
 	json.Unmarshal(rr.Body.Bytes(), &resp)
 	if resp.ClientSecret == "" || resp.Status != string(domain.PaymentRequested) {
@@ -77,6 +79,15 @@ func TestStartDonationEndpoint(t *testing.T) {
 	}
 	if resp.AccountID != "t1" || resp.TenantID != "org-7" {
 		t.Fatalf("resp attribution = %+v, want account t1 / tenant org-7", resp)
+	}
+	// custom metadata is echoed back; non-string values arrive JSON-encoded
+	if resp.Metadata["type"] != "donation" || resp.Metadata["item_id"] != "42" ||
+		resp.Metadata["selection"] != `{"plan_id":3,"project_id":7}` || resp.Metadata["frequency"] != "once" {
+		t.Fatalf("resp metadata = %+v", resp.Metadata)
+	}
+	stored, _ := st.GetPayment(context.Background(), "t1", resp.PaymentIntentID)
+	if stored.Metadata["reference"] != "ref-uuid-1" || stored.Metadata["tenant_id"] != "org-7" {
+		t.Fatalf("stored metadata = %+v", stored.Metadata)
 	}
 	if _, err := st.GetPayment(context.Background(), "t1", resp.PaymentIntentID); err != nil {
 		t.Fatalf("payment not stored: %v", err)

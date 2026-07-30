@@ -98,6 +98,7 @@ func TestForwardsToPerRequestWebhookURL(t *testing.T) {
 	pi, err := h.svc.StartDonation(ctx, app.StartDonationInput{
 		AccountID: "acct_1", TenantID: "org-9", DonorID: h.donor.ID, ProductID: "prod_1", Amount: money.New(4000, "USD"),
 		WebhookURL: "https://caller.example/notify",
+		Metadata:   map[string]string{"type": "donation", "reference": "ref-uuid-1", "selection": `{"project_id":7}`},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -117,6 +118,13 @@ func TestForwardsToPerRequestWebhookURL(t *testing.T) {
 	}
 	if c.Notification.AccountID != "acct_1" || c.Notification.TenantID != "org-9" {
 		t.Fatalf("notification attribution = %+v, want account acct_1 / tenant org-9", c.Notification)
+	}
+	m := c.Notification.Metadata
+	if m["type"] != "donation" || m["reference"] != "ref-uuid-1" || m["selection"] != `{"project_id":7}` {
+		t.Fatalf("notification metadata = %+v", m)
+	}
+	if _, ok := m["webhook_url"]; ok {
+		t.Fatal("webhook_url must not leak into notification metadata")
 	}
 }
 

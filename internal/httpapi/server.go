@@ -81,15 +81,38 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 type startDonationReq struct {
-	AccountID       string `json:"account_id"` // Stripe connected account (required; DEFAULT_ACCOUNT_ID fills it when configured)
-	TenantID        string `json:"tenant_id"`  // optional caller identifier, echoed back via metadata
-	DonorID         string `json:"donor_id"`
-	ProductID       string `json:"product_id"`
-	Amount          int64  `json:"amount"`
-	Currency        string `json:"currency"`
-	PaymentMethodID string `json:"payment_method_id"`
-	IdempotencyKey  string `json:"idempotency_key"`
-	WebhookURL      string `json:"webhook_url"` // optional
+	AccountID       string         `json:"account_id"` // Stripe connected account (required; DEFAULT_ACCOUNT_ID fills it when configured)
+	TenantID        string         `json:"tenant_id"`  // optional caller identifier, echoed back via metadata
+	DonorID         string         `json:"donor_id"`
+	ProductID       string         `json:"product_id"`
+	Amount          int64          `json:"amount"`
+	Currency        string         `json:"currency"`
+	PaymentMethodID string         `json:"payment_method_id"`
+	IdempotencyKey  string         `json:"idempotency_key"`
+	WebhookURL      string         `json:"webhook_url"` // optional
+	Metadata        map[string]any `json:"metadata"`    // optional custom parameters; non-strings are JSON-encoded
+}
+
+// stringifyMetadata converts caller metadata to Stripe's string-to-string
+// format: strings pass through, everything else (numbers, booleans, nested
+// objects, arrays) is JSON-encoded.
+func stringifyMetadata(in map[string]any) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if s, ok := v.(string); ok {
+			out[k] = s
+			continue
+		}
+		b, err := json.Marshal(v)
+		if err != nil {
+			continue
+		}
+		out[k] = string(b)
+	}
+	return out
 }
 
 func (s *Server) startDonation(w http.ResponseWriter, r *http.Request) {
@@ -103,10 +126,11 @@ func (s *Server) startDonation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errAccountRequired)
 		return
 	}
+	meta := stringifyMetadata(req.Metadata)
 	pi, err := s.deps.Service.StartDonation(r.Context(), app.StartDonationInput{
 		AccountID: accountID, TenantID: req.TenantID, DonorID: req.DonorID, ProductID: req.ProductID,
 		Amount: money.New(req.Amount, req.Currency), PaymentMethodID: req.PaymentMethodID,
-		IdempotencyKey: req.IdempotencyKey, WebhookURL: req.WebhookURL,
+		IdempotencyKey: req.IdempotencyKey, WebhookURL: req.WebhookURL, Metadata: meta,
 	})
 	if err != nil {
 		writeError(w, statusForError(err), err)
@@ -121,22 +145,25 @@ func (s *Server) startDonation(w http.ResponseWriter, r *http.Request) {
 	if req.TenantID != "" {
 		resp["tenant_id"] = req.TenantID
 	}
+	if len(meta) > 0 {
+		resp["metadata"] = meta
+	}
 	writeJSON(w, http.StatusCreated, resp)
 }
 
 type createLinkReq struct {
-	AccountID      string            `json:"account_id"` // Stripe connected account (required; DEFAULT_ACCOUNT_ID fills it when configured)
-	TenantID       string            `json:"tenant_id"`  // optional caller identifier, echoed back via metadata
-	ProductName    string            `json:"product_name"`
-	ProductID      string            `json:"product_id"`
-	CustomerID     string            `json:"customer_id"` // donor id; optional, used to pre-fill the hosted page
-	Email          string            `json:"email"`       // optional donor email; stamped into metadata + pre-fills the page
-	Amount         int64             `json:"amount"`      // one-time: preset/min; subscription: fixed monthly
-	Currency       string            `json:"currency"`
-	Recurring      bool              `json:"recurring"`       // false = one-time custom amount, true = monthly
-	WebhookURL     string            `json:"webhook_url"`     // optional
-	Metadata       map[string]string `json:"metadata"`        // optional custom key/value parameters
-	EditableAmount bool              `json:"editable_amount"` // one-time: donor may edit the amount
+	AccountID      string         `json:"account_id"` // Stripe connected account (required; DEFAULT_ACCOUNT_ID fills it when configured)
+	TenantID       string         `json:"tenant_id"`  // optional caller identifier, echoed back via metadata
+	ProductName    string         `json:"product_name"`
+	ProductID      string         `json:"product_id"`
+	CustomerID     string         `json:"customer_id"` // donor id; optional, used to pre-fill the hosted page
+	Email          string         `json:"email"`       // optional donor email; stamped into metadata + pre-fills the page
+	Amount         int64          `json:"amount"`      // one-time: preset/min; subscription: fixed monthly
+	Currency       string         `json:"currency"`
+	Recurring      bool           `json:"recurring"`       // false = one-time custom amount, true = monthly
+	WebhookURL     string         `json:"webhook_url"`     // optional
+	Metadata       map[string]any `json:"metadata"`        // optional custom parameters; non-strings are JSON-encoded
+	EditableAmount bool           `json:"editable_amount"` // one-time: donor may edit the amount
 }
 
 func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
@@ -154,10 +181,11 @@ func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errAccountRequired)
 		return
 	}
+	meta := stringifyMetadata(req.Metadata)
 	link, err := s.deps.Service.CreateDonationLink(r.Context(), app.LinkInput{
 		AccountID: accountID, TenantID: req.TenantID, ProductName: req.ProductName, ProductID: req.ProductID,
 		Amount: money.New(req.Amount, cur), Recurring: req.Recurring, DonorID: req.CustomerID, Email: req.Email,
-		WebhookURL: req.WebhookURL, Metadata: req.Metadata, AmountEditable: req.EditableAmount,
+		WebhookURL: req.WebhookURL, Metadata: meta, AmountEditable: req.EditableAmount,
 	})
 	if err != nil {
 		writeError(w, statusForError(err), err)
@@ -172,6 +200,9 @@ func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.TenantID != "" {
 		resp["tenant_id"] = req.TenantID
+	}
+	if len(meta) > 0 {
+		resp["metadata"] = meta
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }

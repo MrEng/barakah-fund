@@ -13,13 +13,14 @@ import (
 // Notification is the payload forwarded to a caller's webhook URL when a
 // payment reaches a terminal state.
 type Notification struct {
-	Event           string `json:"event"`
-	PaymentIntentID string `json:"payment_intent_id"`
-	AccountID       string `json:"account_id"`
-	TenantID        string `json:"tenant_id,omitempty"` // caller's identifier, echoed from metadata
-	Status          string `json:"status"`
-	Amount          int64  `json:"amount"`
-	Currency        string `json:"currency"`
+	Event           string            `json:"event"`
+	PaymentIntentID string            `json:"payment_intent_id"`
+	AccountID       string            `json:"account_id"`
+	TenantID        string            `json:"tenant_id,omitempty"` // caller's identifier, echoed from metadata
+	Status          string            `json:"status"`
+	Amount          int64             `json:"amount"`
+	Currency        string            `json:"currency"`
+	Metadata        map[string]string `json:"metadata,omitempty"` // full attribution + caller metadata (routing URL excluded)
 }
 
 // Forwarder delivers a Notification to a caller-supplied URL.

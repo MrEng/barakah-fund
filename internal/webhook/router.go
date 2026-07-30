@@ -92,9 +92,14 @@ func (r *Router) forward(ctx context.Context, e payment.Event, p domain.Payment)
 		return nil
 	}
 	url, tenantID := "", ""
+	// The event's metadata round-tripped through Stripe, so it is authoritative;
+	// fall back to the locally stored copy for events without an intent.
+	meta := p.Metadata
 	if e.PaymentIntent != nil {
 		url = e.PaymentIntent.Metadata["webhook_url"]
-		tenantID = e.PaymentIntent.Metadata["tenant_id"]
+		if len(e.PaymentIntent.Metadata) > 0 {
+			meta = e.PaymentIntent.Metadata
+		}
 	}
 	if url == "" {
 		url = r.defaultWebhookURL
@@ -102,8 +107,12 @@ func (r *Router) forward(ctx context.Context, e payment.Event, p domain.Payment)
 	if url == "" {
 		return nil // nothing to forward to
 	}
-	if tenantID == "" {
-		tenantID = p.Metadata["tenant_id"]
+	tenantID = meta["tenant_id"]
+	outMeta := make(map[string]string, len(meta))
+	for k, v := range meta {
+		if k != "webhook_url" { // routing detail, not caller data
+			outMeta[k] = v
+		}
 	}
 	return r.forwarder.Notify(ctx, url, Notification{
 		Event:           string(e.Type),
@@ -113,6 +122,7 @@ func (r *Router) forward(ctx context.Context, e payment.Event, p domain.Payment)
 		Status:          string(p.Status),
 		Amount:          p.Amount.Amount,
 		Currency:        p.Amount.Currency,
+		Metadata:        outMeta,
 	})
 }
 

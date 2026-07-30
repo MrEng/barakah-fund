@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"time"
@@ -98,8 +99,10 @@ CREATE TABLE IF NOT EXISTS payments (
 	failure_reason TEXT NOT NULL DEFAULT '',
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	metadata JSONB NOT NULL DEFAULT '{}',
 	PRIMARY KEY (account_id, stripe_payment_intent_id)
 );
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS payments_product_idx ON payments (account_id, product_id);
 CREATE TABLE IF NOT EXISTS subscriptions (
 	account_id TEXT NOT NULL,
@@ -209,24 +212,37 @@ func (p *Postgres) scanDonor(ctx context.Context, q string, args ...any) (domain
 // --- payments ---
 
 func (p *Postgres) UpsertPayment(ctx context.Context, pm domain.Payment) error {
-	_, err := p.pool.Exec(ctx, `
+	meta, err := json.Marshal(orEmpty(pm.Metadata))
+	if err != nil {
+		return err
+	}
+	_, err = p.pool.Exec(ctx, `
 		INSERT INTO payments (account_id, stripe_payment_intent_id, donor_id, product_id,
-			amount_minor, currency, status, application_fee_minor, source, failure_reason, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			amount_minor, currency, status, application_fee_minor, source, failure_reason, created_at, updated_at, metadata)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (account_id, stripe_payment_intent_id) DO UPDATE SET
 			donor_id=EXCLUDED.donor_id, product_id=EXCLUDED.product_id, amount_minor=EXCLUDED.amount_minor,
 			currency=EXCLUDED.currency, status=EXCLUDED.status, application_fee_minor=EXCLUDED.application_fee_minor,
-			source=EXCLUDED.source, failure_reason=EXCLUDED.failure_reason, updated_at=EXCLUDED.updated_at`,
+			source=EXCLUDED.source, failure_reason=EXCLUDED.failure_reason, updated_at=EXCLUDED.updated_at,
+			metadata=EXCLUDED.metadata`,
 		pm.AccountID, pm.StripePaymentIntentID, pm.DonorID, pm.ProductID, pm.Amount.Amount, pm.Amount.Currency,
 		string(pm.Status), pm.ApplicationFee.Amount, string(pm.Source), pm.FailureReason,
-		nz(pm.CreatedAt), nz(pm.UpdatedAt))
+		nz(pm.CreatedAt), nz(pm.UpdatedAt), meta)
 	return err
+}
+
+// orEmpty keeps the stored JSON an object (not null) for absent metadata.
+func orEmpty(m map[string]string) map[string]string {
+	if m == nil {
+		return map[string]string{}
+	}
+	return m
 }
 
 func (p *Postgres) GetPayment(ctx context.Context, accountID, piID string) (domain.Payment, error) {
 	row := p.pool.QueryRow(ctx, `
 		SELECT account_id, stripe_payment_intent_id, donor_id, product_id, amount_minor, currency,
-			status, application_fee_minor, source, failure_reason, created_at, updated_at
+			status, application_fee_minor, source, failure_reason, created_at, updated_at, metadata
 		FROM payments WHERE account_id=$1 AND stripe_payment_intent_id=$2`, accountID, piID)
 	pm, err := scanPayment(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -237,7 +253,7 @@ func (p *Postgres) GetPayment(ctx context.Context, accountID, piID string) (doma
 
 func (p *Postgres) ListPayments(ctx context.Context, f PaymentFilter) ([]domain.Payment, error) {
 	q := `SELECT account_id, stripe_payment_intent_id, donor_id, product_id, amount_minor, currency,
-			status, application_fee_minor, source, failure_reason, created_at, updated_at
+			status, application_fee_minor, source, failure_reason, created_at, updated_at, metadata
 		FROM payments WHERE account_id=$1`
 	args := []any{f.AccountID}
 	if f.ProductID != "" {
@@ -276,14 +292,23 @@ func scanPayment(row scanner) (domain.Payment, error) {
 	var pm domain.Payment
 	var amount, fee int64
 	var currency, status, source string
+	var meta []byte
 	if err := row.Scan(&pm.AccountID, &pm.StripePaymentIntentID, &pm.DonorID, &pm.ProductID,
-		&amount, &currency, &status, &fee, &source, &pm.FailureReason, &pm.CreatedAt, &pm.UpdatedAt); err != nil {
+		&amount, &currency, &status, &fee, &source, &pm.FailureReason, &pm.CreatedAt, &pm.UpdatedAt, &meta); err != nil {
 		return domain.Payment{}, err
 	}
 	pm.Amount = money.New(amount, currency)
 	pm.ApplicationFee = money.New(fee, currency)
 	pm.Status = domain.PaymentStatus(status)
 	pm.Source = domain.Source(source)
+	if len(meta) > 0 {
+		if err := json.Unmarshal(meta, &pm.Metadata); err != nil {
+			return domain.Payment{}, err
+		}
+	}
+	if len(pm.Metadata) == 0 {
+		pm.Metadata = nil
+	}
 	return pm, nil
 }
 

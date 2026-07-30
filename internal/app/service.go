@@ -129,7 +129,8 @@ type StartDonationInput struct {
 	Amount          money.Money
 	PaymentMethodID string // set to confirm a saved card server-side
 	IdempotencyKey  string
-	WebhookURL      string // optional; caller's notification URL (else the default)
+	WebhookURL      string            // optional; caller's notification URL (else the default)
+	Metadata        map[string]string // optional custom parameters; ride through to the charge and webhooks
 }
 
 // StartDonation creates a PaymentIntent and returns the client secret for the
@@ -151,7 +152,15 @@ func (s *Service) StartDonation(ctx context.Context, in StartDonationInput) (pay
 			return s.gw.GetPaymentIntent(ctx, t.StripeAccountID, piID)
 		}
 	}
-	meta := attribution(in.AccountID, in.TenantID)
+	// Caller's custom parameters first, then the reserved keys so our
+	// attribution/routing always wins over any collision.
+	meta := map[string]string{}
+	for k, v := range in.Metadata {
+		meta[k] = v
+	}
+	for k, v := range attribution(in.AccountID, in.TenantID) {
+		meta[k] = v
+	}
 	meta["product_id"] = in.ProductID
 	meta["email"] = d.Email
 	if in.WebhookURL != "" {
@@ -170,9 +179,13 @@ func (s *Service) StartDonation(ctx context.Context, in StartDonationInput) (pay
 		return payment.PaymentIntent{}, fmt.Errorf("create payment intent: %w", err)
 	}
 	now := s.now()
-	localMeta := map[string]string{"product_id": in.ProductID}
-	if in.TenantID != "" {
-		localMeta["tenant_id"] = in.TenantID
+	// Persist the same metadata locally (minus the routing URL) so results and
+	// reports can return it without a Stripe read.
+	localMeta := make(map[string]string, len(meta))
+	for k, v := range meta {
+		if k != "webhook_url" {
+			localMeta[k] = v
+		}
 	}
 	if err := s.store.UpsertPayment(ctx, domain.Payment{
 		AccountID: in.AccountID, DonorID: in.DonorID, ProductID: in.ProductID,
