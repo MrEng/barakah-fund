@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,16 +27,18 @@ import (
 
 // Deps are the collaborators an HTTP server needs.
 type Deps struct {
-	Service          *app.Service
-	Router           *webhook.Router
-	Engine           *recon.Engine
-	Gateway          payment.Gateway
-	Store            store.Store
-	WebhookSecret    string
-	Currency         string // reporting currency for the metrics dashboard
-	DefaultAccountID string // used when a request omits account_id
-	Metrics          *telemetry.Metrics
-	Logger           *slog.Logger
+	Service           *app.Service
+	ServiceLive       *app.Service // optional; serves requests with "mode":"live"/"prod"
+	Router            *webhook.Router
+	Engine            *recon.Engine
+	Gateway           payment.Gateway
+	Store             store.Store
+	WebhookSecret     string
+	WebhookSecretLive string // optional; tried when the primary secret fails
+	Currency          string // reporting currency for the metrics dashboard
+	DefaultAccountID  string // used when a request omits account_id
+	Metrics           *telemetry.Metrics
+	Logger            *slog.Logger
 }
 
 // accountOr returns the request account id, or the configured default when empty.
@@ -49,6 +52,22 @@ func (s *Server) accountOr(id string) string {
 // errAccountRequired is returned when neither the request nor the server
 // configuration provides a Stripe account id.
 var errAccountRequired = errors.New("account_id is required")
+
+// serviceFor picks the Stripe stack for a request's mode: "test" (or empty)
+// uses the default key, "live"/"prod" the live key. Anything else is rejected.
+func (s *Server) serviceFor(mode string) (*app.Service, error) {
+	switch strings.ToLower(mode) {
+	case "", "test":
+		return s.deps.Service, nil
+	case "live", "prod":
+		if s.deps.ServiceLive == nil {
+			return nil, errors.New("live mode is not configured on this server")
+		}
+		return s.deps.ServiceLive, nil
+	default:
+		return nil, errors.New("unknown mode " + strconv.Quote(mode) + `: use "test", "live" or "prod"`)
+	}
+}
 
 // Server holds dependencies and a route mux.
 type Server struct {
@@ -92,6 +111,7 @@ type startDonationReq struct {
 	PaymentMethodID string         `json:"payment_method_id"`
 	IdempotencyKey  string         `json:"idempotency_key"`
 	WebhookURL      string         `json:"webhook_url"` // optional
+	Mode            string         `json:"mode"`        // "test" (default) or "live"/"prod": selects the Stripe key
 	Metadata        map[string]any `json:"metadata"`    // optional custom parameters; non-strings are JSON-encoded
 }
 
@@ -173,14 +193,22 @@ func (s *Server) startDonation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	svc, err := s.serviceFor(req.Mode)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	// flat unknown fields plus the explicit metadata object (which wins)
 	meta := mergeMeta(extras, stringifyMetadata(req.Metadata))
+	if req.Mode != "" {
+		meta = mergeMeta(meta, map[string]string{"mode": req.Mode})
+	}
 	accountID := s.accountOr(req.AccountID)
 	if accountID == "" {
 		writeError(w, http.StatusBadRequest, errAccountRequired)
 		return
 	}
-	pi, err := s.deps.Service.StartDonation(r.Context(), app.StartDonationInput{
+	pi, err := svc.StartDonation(r.Context(), app.StartDonationInput{
 		AccountID: accountID, TenantID: req.TenantID, DonorID: req.DonorID, ProductID: req.ProductID,
 		Amount: money.New(req.Amount, req.Currency), PaymentMethodID: req.PaymentMethodID,
 		IdempotencyKey: req.IdempotencyKey, WebhookURL: req.WebhookURL, Metadata: meta,
@@ -215,6 +243,7 @@ type createLinkReq struct {
 	Currency       string         `json:"currency"`
 	Recurring      bool           `json:"recurring"`       // false = one-time custom amount, true = monthly
 	WebhookURL     string         `json:"webhook_url"`     // optional
+	Mode           string         `json:"mode"`            // "test" (default) or "live"/"prod": selects the Stripe key
 	Metadata       map[string]any `json:"metadata"`        // optional custom parameters; non-strings are JSON-encoded
 	EditableAmount bool           `json:"editable_amount"` // one-time: donor may edit the amount
 }
@@ -228,8 +257,16 @@ func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	svc, err := s.serviceFor(req.Mode)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	// flat unknown fields plus the explicit metadata object (which wins)
 	meta := mergeMeta(extras, stringifyMetadata(req.Metadata))
+	if req.Mode != "" {
+		meta = mergeMeta(meta, map[string]string{"mode": req.Mode})
+	}
 	cur := req.Currency
 	if cur == "" {
 		cur = s.deps.Currency
@@ -239,7 +276,7 @@ func (s *Server) createPaymentLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errAccountRequired)
 		return
 	}
-	link, err := s.deps.Service.CreateDonationLink(r.Context(), app.LinkInput{
+	link, err := svc.CreateDonationLink(r.Context(), app.LinkInput{
 		AccountID: accountID, TenantID: req.TenantID, ProductName: req.ProductName, ProductID: req.ProductID,
 		Amount: money.New(req.Amount, cur), Recurring: req.Recurring, DonorID: req.CustomerID, Email: req.Email,
 		WebhookURL: req.WebhookURL, Metadata: meta, AmountEditable: req.EditableAmount,
@@ -271,6 +308,10 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ev, err := s.deps.Gateway.VerifyWebhookSignature(body, r.Header.Get("Stripe-Signature"), s.deps.WebhookSecret)
+	if err != nil && s.deps.WebhookSecretLive != "" {
+		// Live-mode events are signed with the live endpoint's secret.
+		ev, err = s.deps.Gateway.VerifyWebhookSignature(body, r.Header.Get("Stripe-Signature"), s.deps.WebhookSecretLive)
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

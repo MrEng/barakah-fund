@@ -130,6 +130,50 @@ func TestFlatTopLevelFieldsBecomeMetadata(t *testing.T) {
 	}
 }
 
+func TestModeSelectsStripeStack(t *testing.T) {
+	ctx := context.Background()
+	gwTest, gwLive := mock.New(), mock.New()
+	st := store.NewMemory()
+	rec := &email.Recorder{}
+	srv := NewServer(Deps{
+		Service:     app.New(gwTest, st, rec, app.Options{}),
+		ServiceLive: app.New(gwLive, st, rec, app.Options{}),
+		Router:      webhook.New(st, rec, nil), Engine: recon.New(gwTest, st, nil),
+		Gateway: stripe.New("sk"), Store: st, WebhookSecret: webhookSecret, Currency: "USD",
+	})
+	_ = ctx
+
+	body := `{"account_id":"t1","product_name":"Zakat","amount":1000,"currency":"USD","mode":"prod"}`
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/payment-links", bytes.NewBufferString(body)))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if gwLive.LastLinkParams().PriceID == "" {
+		t.Fatal("prod mode must use the live gateway")
+	}
+	if gwTest.LastLinkParams().PriceID != "" {
+		t.Fatal("prod mode must not touch the test gateway")
+	}
+
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/payment-links",
+		bytes.NewBufferString(`{"account_id":"t1","product_name":"Z","amount":100,"currency":"USD","mode":"staging"}`)))
+	if rr.Code != http.StatusBadRequest || !bytes.Contains(rr.Body.Bytes(), []byte("unknown mode")) {
+		t.Fatalf("unknown mode: status = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestLiveModeUnconfiguredRejected(t *testing.T) {
+	srv, _, _ := newServer(t) // no ServiceLive wired
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/payment-links",
+		bytes.NewBufferString(`{"account_id":"t1","product_name":"Z","amount":100,"currency":"USD","mode":"live"}`)))
+	if rr.Code != http.StatusBadRequest || !bytes.Contains(rr.Body.Bytes(), []byte("not configured")) {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestAccountIDRequired(t *testing.T) {
 	srv, _, d := newServer(t)
 	for _, tc := range []struct{ name, path, body string }{

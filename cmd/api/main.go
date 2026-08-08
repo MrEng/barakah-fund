@@ -71,6 +71,14 @@ func main() {
 	}
 
 	svc := app.New(gw, st, notifier, app.Options{ApplicationFeeBps: envInt("APPLICATION_FEE_BPS", 0)})
+
+	// Optional live-mode stack: requests with "mode":"live"/"prod" run on the
+	// live Stripe key. Absent the key, live requests are rejected.
+	var svcLive *app.Service
+	if liveKey := os.Getenv("STRIPE_SECRET_KEY_LIVE"); liveKey != "" {
+		svcLive = app.New(stripe.New(liveKey), st, notifier, app.Options{ApplicationFeeBps: envInt("APPLICATION_FEE_BPS", 0)})
+		logger.Info("live stripe gateway configured")
+	}
 	router := webhook.New(st, notifier, time.Now,
 		webhook.WithForwarder(webhook.NewHTTPForwarder()),
 		webhook.WithDefaultWebhookURL(os.Getenv("DEFAULT_WEBHOOK_URL")),
@@ -79,12 +87,13 @@ func main() {
 	engine := recon.New(gw, st, time.Now, recon.WithMetrics(tel))
 
 	srv := httpapi.NewServer(httpapi.Deps{
-		Service: svc, Router: router, Engine: engine, Gateway: gw, Store: st,
-		WebhookSecret:    os.Getenv("STRIPE_WEBHOOK_SECRET"),
-		Currency:         envStr("REPORTING_CURRENCY", "USD"),
-		DefaultAccountID: defaultAccountID,
-		Metrics:          tel,
-		Logger:           logger,
+		Service: svc, ServiceLive: svcLive, Router: router, Engine: engine, Gateway: gw, Store: st,
+		WebhookSecret:     os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		WebhookSecretLive: os.Getenv("STRIPE_WEBHOOK_SECRET_LIVE"),
+		Currency:          envStr("REPORTING_CURRENCY", "USD"),
+		DefaultAccountID:  defaultAccountID,
+		Metrics:           tel,
+		Logger:            logger,
 	})
 
 	addr := ":" + envStr("PORT", "8080") // Cloud Run provides $PORT
