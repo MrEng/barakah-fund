@@ -58,7 +58,7 @@ func TestHealth(t *testing.T) {
 
 func TestStartDonationEndpoint(t *testing.T) {
 	srv, st, d := newServer(t)
-	body := fmt.Sprintf(`{"account_id":"t1","tenant_id":"org-7","donor_id":%q,"product_id":"prod_1","amount":5000,"currency":"USD",
+	body := fmt.Sprintf(`{"account_id":"t1","mode":"test","tenant_id":"org-7","donor_id":%q,"product_id":"prod_1","amount":5000,"currency":"USD",
 		"metadata":{"type":"donation","item_type":"program","item_id":42,"selection":{"project_id":7,"plan_id":3},"frequency":"once","reference":"ref-uuid-1","mode":"test"}}`, d.ID)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/donations", bytes.NewBufferString(body)))
@@ -164,6 +164,22 @@ func TestModeSelectsStripeStack(t *testing.T) {
 	}
 }
 
+func TestOmittedModeRejected(t *testing.T) {
+	srv, _, d := newServer(t)
+	for _, tc := range []struct{ name, path, body string }{
+		{"donation", "/v1/donations", fmt.Sprintf(`{"account_id":"t1","donor_id":%q,"amount":5000,"currency":"USD"}`, d.ID)},
+		{"payment-link", "/v1/payment-links", `{"account_id":"t1","product_name":"Zakat","amount":5000,"currency":"USD"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, tc.path, bytes.NewBufferString(tc.body)))
+			if rr.Code != http.StatusBadRequest || !bytes.Contains(rr.Body.Bytes(), []byte("unknown mode")) {
+				t.Fatalf("status = %d body=%s, want 400 unknown mode", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
 func TestLiveModeUnconfiguredRejected(t *testing.T) {
 	srv, _, _ := newServer(t) // no ServiceLive wired
 	rr := httptest.NewRecorder()
@@ -177,8 +193,8 @@ func TestLiveModeUnconfiguredRejected(t *testing.T) {
 func TestAccountIDRequired(t *testing.T) {
 	srv, _, d := newServer(t)
 	for _, tc := range []struct{ name, path, body string }{
-		{"donation", "/v1/donations", fmt.Sprintf(`{"donor_id":%q,"amount":5000,"currency":"USD"}`, d.ID)},
-		{"payment-link", "/v1/payment-links", `{"product_name":"Zakat","amount":5000,"currency":"USD"}`},
+		{"donation", "/v1/donations", fmt.Sprintf(`{"mode":"test","donor_id":%q,"amount":5000,"currency":"USD"}`, d.ID)},
+		{"payment-link", "/v1/payment-links", `{"mode":"test","product_name":"Zakat","amount":5000,"currency":"USD"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := httptest.NewRecorder()
@@ -204,7 +220,7 @@ func TestCreatePaymentLinkEndpoint(t *testing.T) {
 		{"subscription", true, "subscription"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := fmt.Sprintf(`{"account_id":"t1","customer_id":%q,"product_name":"Zakat","amount":5000,"currency":"USD","recurring":%v}`, d.ID, tc.recurring)
+			body := fmt.Sprintf(`{"account_id":"t1","mode":"test","customer_id":%q,"product_name":"Zakat","amount":5000,"currency":"USD","recurring":%v}`, d.ID, tc.recurring)
 			rr := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/payment-links", bytes.NewBufferString(body)))
 			if rr.Code != http.StatusCreated {
@@ -222,7 +238,7 @@ func TestCreatePaymentLinkEndpoint(t *testing.T) {
 func TestWebhookEndpoint(t *testing.T) {
 	srv, st, d := newServer(t)
 	// Create a donation to get a real intent id.
-	body := fmt.Sprintf(`{"account_id":"t1","donor_id":%q,"product_id":"prod_1","amount":5000,"currency":"USD"}`, d.ID)
+	body := fmt.Sprintf(`{"account_id":"t1","mode":"test","donor_id":%q,"product_id":"prod_1","amount":5000,"currency":"USD"}`, d.ID)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/donations", bytes.NewBufferString(body)))
 	var created struct {

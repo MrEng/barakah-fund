@@ -33,7 +33,7 @@ func TestOneTimePaymentLink(t *testing.T) {
 	defer srv.Close()
 
 	url, err := New(srv.URL).OneTimePaymentLink(context.Background(), Request{
-		AccountID: "acct_demo", TenantID: "demo-tenant", CustomerID: "cus_123", ProductName: "Zakat", AmountMinor: 5000, Currency: "USD",
+		AccountID: "acct_demo", Mode: "test", TenantID: "demo-tenant", CustomerID: "cus_123", ProductName: "Zakat", AmountMinor: 5000, Currency: "USD",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestSubscriptionPaymentLink(t *testing.T) {
 	defer srv.Close()
 
 	url, err := New(srv.URL).SubscriptionPaymentLink(context.Background(), Request{
-		AccountID: "acct_demo", CustomerID: "cus_123", ProductName: "Monthly Sadaqah", AmountMinor: 2000, Currency: "USD",
+		AccountID: "acct_demo", Mode: "test", CustomerID: "cus_123", ProductName: "Monthly Sadaqah", AmountMinor: 2000, Currency: "USD",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +83,7 @@ func TestLiveDeployedService(t *testing.T) {
 
 	// One-time with an editable preset: $50 is pre-filled but the donor can change it.
 	oneTime, err := c.OneTimePaymentLink(ctx, Request{
-		ProductName: "Water Wells", AmountMinor: 5000, Currency: "USD", AmountEditable: true,
+		Mode: "test", ProductName: "Water Wells", AmountMinor: 5000, Currency: "USD", AmountEditable: true,
 	})
 	if err != nil {
 		t.Fatalf("one-time: %v", err)
@@ -92,7 +92,7 @@ func TestLiveDeployedService(t *testing.T) {
 
 	// Subscription is a FIXED monthly price: 100 minor units = $1.00 / month.
 	sub, err := c.SubscriptionPaymentLink(ctx, Request{
-		ProductName: "Monthly Water", AmountMinor: 100, Currency: "USD",
+		Mode: "test", ProductName: "Monthly Water", AmountMinor: 100, Currency: "USD",
 	})
 	if err != nil {
 		t.Fatalf("subscription: %v", err)

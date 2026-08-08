@@ -53,11 +53,12 @@ func (s *Server) accountOr(id string) string {
 // configuration provides a Stripe account id.
 var errAccountRequired = errors.New("account_id is required")
 
-// serviceFor picks the Stripe stack for a request's mode: "test" (or empty)
-// uses the default key, "live"/"prod" the live key. Anything else is rejected.
+// serviceFor picks the Stripe stack for a request's mode: "test" uses the
+// default key, "live"/"prod" the live key. The field is required — an omitted
+// or unrecognised mode is rejected rather than assumed.
 func (s *Server) serviceFor(mode string) (*app.Service, error) {
 	switch strings.ToLower(mode) {
-	case "", "test":
+	case "test":
 		return s.deps.Service, nil
 	case "live", "prod":
 		if s.deps.ServiceLive == nil {
@@ -111,7 +112,7 @@ type startDonationReq struct {
 	PaymentMethodID string         `json:"payment_method_id"`
 	IdempotencyKey  string         `json:"idempotency_key"`
 	WebhookURL      string         `json:"webhook_url"` // optional
-	Mode            string         `json:"mode"`        // "test" (default) or "live"/"prod": selects the Stripe key
+	Mode            string         `json:"mode"`        // required: "test" or "live"/"prod", selects the Stripe key
 	Metadata        map[string]any `json:"metadata"`    // optional custom parameters; non-strings are JSON-encoded
 }
 
@@ -243,7 +244,7 @@ type createLinkReq struct {
 	Currency       string         `json:"currency"`
 	Recurring      bool           `json:"recurring"`       // false = one-time custom amount, true = monthly
 	WebhookURL     string         `json:"webhook_url"`     // optional
-	Mode           string         `json:"mode"`            // "test" (default) or "live"/"prod": selects the Stripe key
+	Mode           string         `json:"mode"`            // required: "test" or "live"/"prod", selects the Stripe key
 	Metadata       map[string]any `json:"metadata"`        // optional custom parameters; non-strings are JSON-encoded
 	EditableAmount bool           `json:"editable_amount"` // one-time: donor may edit the amount
 }
